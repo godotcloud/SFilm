@@ -1,0 +1,1178 @@
+# ==============================================================================
+# Spektrafilm iOS Native App — Self-Contained Extraction-Free GitHub Actions Workflow
+# 自包含免解压 GitHub Actions 编译工作流 (.github/workflows/build.yml)
+#
+# 核心特性：
+# 1. 【源码自包含免解压】：无需在仓库上传或解压任何源码压缩包，只需将本文件放入
+#    `.github/workflows/build.yml`，若仓库内不存在 Sources/ 源码，工作流会自动通过纯文本
+#    Heredoc 生成完整 Metal 光谱着色器、SwiftUI 原生源码、Info.plist 与 XcodeGen 配置。
+# 2. 【针对 iPhone 13 Pro Max 深度优化】：
+#    - 目标设备架构：arm64 (Apple A15 Bionic 5-Core GPU, Metal 3.0)
+#    - 屏幕与高刷支持：6.7" Super Retina XDR (1284×2778 @3x, Display P3 广色域,
+#      开启 CADisableMinimumFrameDurationOnPhone 120Hz ProMotion 实时预览)
+#    - 影像管线支持：原生 CIRAWFilter 解码 iPhone 13 Pro Max Apple ProRAW (.dng)
+# 3. 【产物免解压直装 (.ipa)】：
+#    - 自动使用 ldid 注入 TrollStore / SideStore / AltStore 兼容签名
+#    - 通过 GitHub Releases 直接发布未套壳的 `.ipa` 原文件（Safari 点击直链免解压安装），
+#      同时上传 `compression-level: 0` 的 GitHub Actions Artifact。
+#
+# 上游致谢与开源许可 (GPL-3.0)：
+# - Film modeling powered by spektrafilm (Andrea Volpato): https://github.com/andreavolpato/spektrafilm
+# - spektrafilm OFX Metal Reference: https://github.com/chaert-s/spektrafilm-ofx
+# - darktable spektrafilm documentation: https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/spektrafilm/
+# ==============================================================================
+
+name: Build Spektrafilm iOS (iPhone 13 Pro Max Self-Contained)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios_deployment_target:
+        description: "iOS Deployment Target (iPhone 13 Pro Max 推荐 16.0 或 17.0)"
+        required: false
+        default: "16.0"
+      publish_release_ipa:
+        description: "是否同步发布免解压 .ipa 到 GitHub Releases (Safari 免解压直下)"
+        required: false
+        default: "true"
+  push:
+    branches: [ main, master ]
+    paths:
+      - ".github/workflows/build.yml"
+      - "Sources/**"
+      - "project.yml"
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: "Spektrafilm"
+  BUNDLE_ID: "org.pixls.spektrafilm.ios"
+  TARGET_DEVICE_MODEL: "iPhone14,3" # iPhone 13 Pro Max identifier
+
+jobs:
+  build-ios-ipa:
+    name: Compile Native iOS App (arm64 / A15 Metal)
+    runs-on: macos-14
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Install XcodeGen & ldid (Brew)
+        run: |
+          set -euo pipefail
+          which xcodegen || brew install xcodegen
+          which ldid || brew install ldid
+          xcodebuild -version
+
+      - name: 3. Generate Self-Contained Source Tree (Zero-Archive / Extraction-Free)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Sources Resources
+
+          # --------------------------------------------------------------------
+          # 3.1 Generate Metal Compute Shader (SpektrafilmEngine.metal) if absent
+          # --------------------------------------------------------------------
+          if [ ! -f "Sources/SpektrafilmEngine.metal" ]; then
+            echo "Generating Sources/SpektrafilmEngine.metal inline..."
+            cat << 'EOF_METAL' > Sources/SpektrafilmEngine.metal
+          //
+          //  SpektrafilmEngine.metal
+          //  Spektrafilm iOS Native Port (Optimized for iPhone 13 Pro Max A15 Bionic GPU)
+          //  Film modeling powered by spektrafilm — https://github.com/andreavolpato/spektrafilm
+          //  License: GPL-3.0
+          //
+          #include <metal_stdlib>
+          using namespace metal;
+
+          struct SpektrafilmUniforms {
+              int filmStockID;
+              int printPaperID;
+              int processMode;
+              float frameLongEdgeMM;
+
+              float wbTemperatureOffset;
+              float wbTintOffset;
+              int balanceToFilmStock;
+
+              float filmExposureEV;
+              float pushPullStops;
+              float developmentGamma;
+              float fastLayerGamma;
+              float slowLayerGamma;
+              float developerExhaustion;
+              float dirStrength;
+              float sameLayerInhibition;
+              float interlayerInhibition;
+              float inhibitorSpreadUm;
+              int enableCameraDiffusion;
+              int cameraDiffusionType;
+              float cameraDiffusionStrength;
+              float cameraDiffusionSize;
+              float cameraDiffusionWarmth;
+
+              int enableHalationScatter;
+              float scatterAmount;
+              float scatterSize;
+              float halationStrength;
+              float halationSize;
+              float highlightBoostEV;
+              float boostRange;
+              float boostProtectStops;
+
+              float printExposureEV;
+              int autoPrintExposure;
+              float printGamma;
+              float printGammaR;
+              float printGammaG;
+              float printGammaB;
+              float filtrationM;
+              float filtrationY;
+              float preflashExposure;
+              float preflashM;
+              float preflashY;
+              int enablePrintDiffusion;
+              float printDiffusionStrength;
+              float printDiffusionSize;
+              float printDiffusionWarmth;
+
+              int enableGrain;
+              float granularity;
+              float grainStrength;
+              float uniformity;
+              float sublayerScale;
+              float densityFloor;
+              float grainBlur;
+              float dyeCloudSize;
+              float recoveryRadius;
+              float recoveryStrength;
+              uint randomSeed;
+
+              int enableGamutCompression;
+              float preCompressionBoost;
+              float postCompressionScale;
+              float scannerBlur;
+              float scannerSharpenRadius;
+              float scannerSharpenStrength;
+              float viewingGlare;
+              int blackPointCorrection;
+              float blackLevel;
+              int whitePointCorrection;
+              float whiteLevel;
+              int outputColorSpace;
+              int splitPreviewMode;
+              float splitPosition;
+
+              float3 filmDmin;
+              float3 filmDmax;
+              float3 filmSlope;
+              float3 filmSensShift;
+              float3 filmHalationRatio;
+              float filmBaseRMSGranularity;
+              int filmIsReversal;
+              int filmIsBlackAndWhite;
+              int filmIsTungsten;
+
+              float3 paperDmin;
+              float3 paperDmax;
+              float3 paperSlope;
+              float3 paperCrossMatrixRow0;
+              float3 paperCrossMatrixRow1;
+              float3 paperCrossMatrixRow2;
+
+              float3 filmMatrixRow0;
+              float3 filmMatrixRow1;
+              float3 filmMatrixRow2;
+          };
+
+          inline uint pcg_hash(uint input) {
+              uint state = input * 747796405u + 2891336453u;
+              uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+              return (word >> 22u) ^ word;
+          }
+
+          inline float rand_uniform(uint2 gid, uint channel, uint layer, uint seed) {
+              uint h = pcg_hash(gid.x + pcg_hash(gid.y + pcg_hash(channel * 17u + layer * 31u + seed)));
+              return float(h) * (1.0f / 4294967295.0f);
+          }
+
+          inline float rand_gaussian(uint2 gid, uint channel, uint layer, uint seed) {
+              float u1 = max(rand_uniform(gid, channel, layer * 2u, seed), 1e-6f);
+              float u2 = rand_uniform(gid, channel, layer * 2u + 1u, seed);
+              return sqrt(-2.0f * log(u1)) * cos(6.283185307f * u2);
+          }
+
+          inline float3 evaluate_hd_curve(
+              float3 logE,
+              float3 dmin,
+              float3 dmax,
+              float3 baseSlope,
+              float devGamma,
+              float fastGamma,
+              float slowGamma,
+              float exhaustion,
+              int isReversal
+          ) {
+              float3 span = max(dmax - dmin, float3(0.1f));
+              float3 slope = baseSlope * devGamma;
+              float3 x = logE * slope;
+              float3 slowPart = tanh(x * slowGamma * 0.85f);
+              float3 fastPart = tanh((x - 0.35f) * fastGamma * 0.75f);
+              float3 normalized = clamp(0.5f + 0.32f * slowPart + 0.22f * fastPart, 0.0f, 1.0f);
+              if (isReversal != 0) {
+                  normalized = 1.0f - normalized;
+              }
+              if (exhaustion > 0.0001f) {
+                  normalized = normalized / (1.0f + exhaustion * 0.45f * normalized * normalized);
+              }
+              return dmin + span * normalized;
+          }
+
+          inline float3 apply_oklch_gamut_compression(float3 rgb) {
+              float l = 0.4122214708f * rgb.r + 0.5363325363f * rgb.g + 0.0514459929f * rgb.b;
+              float m = 0.2119034982f * rgb.r + 0.6806995451f * rgb.g + 0.1073969566f * rgb.b;
+              float s = 0.0883024619f * rgb.r + 0.2817188376f * rgb.g + 0.6299787005f * rgb.b;
+
+              float l_ = cbrt(max(l, 0.0f));
+              float m_ = cbrt(max(m, 0.0f));
+              float s_ = cbrt(max(s, 0.0f));
+
+              float L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_;
+              float a = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_;
+              float b = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_;
+
+              float C = sqrt(a * a + b * b);
+              if (C > 0.0001f) {
+                  float maxC = 0.28f;
+                  float compressedC = maxC * tanh(C / maxC);
+                  float scale = compressedC / C;
+                  a *= scale;
+                  b *= scale;
+              }
+              L = L / (1.0f + 0.18f * max(L - 0.75f, 0.0f));
+
+              float l_out = L + 0.3963377774f * a + 0.2158037573f * b;
+              float m_out = L - 0.1055613458f * a - 0.0638541728f * b;
+              float s_out = L - 0.0894841775f * a - 1.2914855480f * b;
+
+              float l3 = l_out * l_out * l_out;
+              float m3 = m_out * m_out * m_out;
+              float s3 = s_out * s_out * s_out;
+
+              float3 outRGB;
+              outRGB.r = +4.0767416621f * l3 - 3.3077115913f * m3 + 0.2309699292f * s3;
+              outRGB.g = -1.2684380046f * l3 + 2.6097574011f * m3 - 0.3413193965f * s3;
+              outRGB.b = -0.0041960863f * l3 - 0.7034186147f * m3 + 1.7076147010f * s3;
+              return max(outRGB, float3(0.0f));
+          }
+
+          inline float3 linear_to_srgb(float3 x) {
+              float3 clamped = clamp(x, 0.0f, 1.0f);
+              float3 lo = clamped * 12.92f;
+              float3 hi = 1.055f * pow(clamped, float3(1.0f / 2.4f)) - 0.055f;
+              return select(lo, hi, clamped > 0.0031308f);
+          }
+
+          inline float3 srgb_to_linear(float3 x) {
+              float3 clamped = clamp(x, 0.0f, 1.0f);
+              float3 lo = clamped / 12.92f;
+              float3 hi = pow((clamped + 0.055f) / 1.055f, float3(2.4f));
+              return select(lo, hi, clamped > 0.04045f);
+          }
+
+          inline float3 sample_spatial_blur(
+              texture2d<float, access::sample> tex,
+              sampler s,
+              float2 uv,
+              float2 texelSize,
+              float radiusPx
+          ) {
+              if (radiusPx <= 0.05f) {
+                  return srgb_to_linear(tex.sample(s, uv).rgb);
+              }
+              const float2 offsets[8] = {
+                  float2( 1.0f,  0.0f), float2(-1.0f,  0.0f),
+                  float2( 0.0f,  1.0f), float2( 0.0f, -1.0f),
+                  float2( 0.707f,  0.707f), float2(-0.707f,  0.707f),
+                  float2( 0.707f, -0.707f), float2(-0.707f, -0.707f)
+              };
+              float3 accum = srgb_to_linear(tex.sample(s, uv).rgb) * 0.28f;
+              float weightSum = 0.28f;
+              for (int i = 0; i < 8; ++i) {
+                  float ringScale = (i < 4) ? 0.65f : 1.25f;
+                  float w = (i < 4) ? 0.11f : 0.07f;
+                  float2 sampleUV = clamp(uv + offsets[i] * texelSize * radiusPx * ringScale, 0.0f, 1.0f);
+                  accum += srgb_to_linear(tex.sample(s, sampleUV).rgb) * w;
+                  weightSum += w;
+              }
+              return accum / weightSum;
+          }
+
+          kernel void spektrafilm_pipeline(
+              texture2d<float, access::sample> inTexture [[texture(0)]],
+              texture2d<float, access::write> outTexture [[texture(1)]],
+              constant SpektrafilmUniforms& u [[buffer(0)]],
+              uint2 gid [[thread_position_in_grid]]
+          ) {
+              uint width = outTexture.get_width();
+              uint height = outTexture.get_height();
+              if (gid.x >= width || gid.y >= height) {
+                  return;
+              }
+
+              constexpr sampler texSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+              float2 uv = (float2(gid) + 0.5f) / float2(float(width), float(height));
+              float2 texelSize = 1.0f / float2(float(width), float(height));
+
+              float4 srcPixel = inTexture.sample(texSampler, uv);
+              float3 sceneLinear = srgb_to_linear(srcPixel.rgb);
+
+              if (u.splitPreviewMode == 1 && uv.x < u.splitPosition) {
+                  if (abs(uv.x - u.splitPosition) < texelSize.x * 2.0f) {
+                      outTexture.write(float4(0.95f, 0.78f, 0.25f, 1.0f), gid);
+                  } else {
+                      outTexture.write(srcPixel, gid);
+                  }
+                  return;
+              }
+
+              float formatScale = 36.0f / max(u.frameLongEdgeMM, 4.0f);
+              float pxScale = float(max(width, height)) / 2000.0f;
+
+              float3 wbGain = float3(
+                  1.0f + u.wbTemperatureOffset * 0.35f + u.wbTintOffset * 0.15f,
+                  1.0f - u.wbTintOffset * 0.20f,
+                  1.0f - u.wbTemperatureOffset * 0.35f + u.wbTintOffset * 0.15f
+              );
+              if (u.balanceToFilmStock != 0 && u.filmIsTungsten != 0) {
+                  wbGain *= float3(1.32f, 1.02f, 0.72f);
+              }
+              sceneLinear = max(sceneLinear * wbGain, float3(1e-5f));
+
+              if (abs(u.highlightBoostEV) > 0.001f) {
+                  float luma = dot(sceneLinear, float3(0.2126f, 0.7152f, 0.0722f));
+                  float threshold = 0.18f * exp2(u.boostProtectStops);
+                  if (luma > threshold) {
+                      float excess = (luma - threshold) / max(u.boostRange, 0.2f);
+                      float boostFactor = exp2(u.highlightBoostEV * tanh(excess));
+                      sceneLinear *= boostFactor;
+                  }
+              }
+
+              if (u.enableCameraDiffusion != 0 && u.cameraDiffusionStrength > 0.001f) {
+                  float diffRadius = u.cameraDiffusionSize * 14.0f * formatScale * pxScale;
+                  float3 halo = sample_spatial_blur(inTexture, texSampler, uv, texelSize, diffRadius) * wbGain;
+                  float3 warmthTint = float3(1.0f + 0.18f * u.cameraDiffusionWarmth, 1.0f, 1.0f - 0.18f * u.cameraDiffusionWarmth);
+                  float blendAmt = clamp(u.cameraDiffusionStrength * 0.45f, 0.0f, 0.85f);
+                  if (u.cameraDiffusionType == 0) {
+                      float3 highlightHalo = max(halo - 0.12f, 0.0f) * warmthTint;
+                      sceneLinear = mix(sceneLinear, sceneLinear + highlightHalo * 0.85f, blendAmt);
+                  } else if (u.cameraDiffusionType == 1) {
+                      sceneLinear = mix(sceneLinear, halo * warmthTint, blendAmt * 0.65f);
+                  } else {
+                      sceneLinear = mix(sceneLinear, halo * warmthTint + float3(0.015f * blendAmt), blendAmt);
+                  }
+              }
+
+              float3 filmIrradiance;
+              filmIrradiance.r = dot(u.filmMatrixRow0, sceneLinear);
+              filmIrradiance.g = dot(u.filmMatrixRow1, sceneLinear);
+              filmIrradiance.b = dot(u.filmMatrixRow2, sceneLinear);
+              filmIrradiance = max(filmIrradiance, float3(1e-5f));
+
+              if (u.enableHalationScatter != 0) {
+                  if (u.scatterAmount > 0.001f) {
+                      float scatterRad = u.scatterSize * 6.0f * formatScale * pxScale;
+                      float3 scattered = sample_spatial_blur(inTexture, texSampler, uv, texelSize, scatterRad) * wbGain;
+                      filmIrradiance = mix(filmIrradiance, max(scattered, float3(1e-5f)), clamp(u.scatterAmount * 0.18f, 0.0f, 0.5f));
+                  }
+                  if (u.halationStrength > 0.001f) {
+                      float halRad = u.halationSize * 22.0f * formatScale * pxScale;
+                      float3 halBlur = sample_spatial_blur(inTexture, texSampler, uv, texelSize, halRad) * wbGain;
+                      float3 brightHal = max(halBlur - float3(0.18f), float3(0.0f));
+                      filmIrradiance += brightHal * u.filmHalationRatio * (u.halationStrength * 4.5f);
+                  }
+              }
+
+              float effectiveFilmEV = u.filmExposureEV - u.pushPullStops + 0.75f;
+              float effectiveDevGamma = u.developmentGamma * pow(1.15f, u.pushPullStops);
+              float3 logExposure = log10(filmIrradiance * exp2(effectiveFilmEV)) + u.filmSensShift;
+
+              float3 filmDensity = evaluate_hd_curve(
+                  logExposure, u.filmDmin, u.filmDmax, u.filmSlope,
+                  effectiveDevGamma, u.fastLayerGamma, u.slowLayerGamma,
+                  u.developerExhaustion, u.filmIsReversal
+              );
+
+              if (u.dirStrength > 0.001f && u.filmIsReversal == 0) {
+                  float3 netDensity = max(filmDensity - u.filmDmin, float3(0.0f));
+                  float meanDensity = (netDensity.r + netDensity.g + netDensity.b) / 3.0f;
+                  float spreadPx = (u.inhibitorSpreadUm / 25.0f) * formatScale * pxScale;
+                  float3 neighborRGB = sample_spatial_blur(inTexture, texSampler, uv, texelSize, spreadPx) * wbGain;
+                  float3 neighborLogE = log10(max(neighborRGB * exp2(effectiveFilmEV), float3(1e-5f))) + u.filmSensShift;
+                  float3 neighborD = evaluate_hd_curve(
+                      neighborLogE, u.filmDmin, u.filmDmax, u.filmSlope,
+                      effectiveDevGamma, u.fastLayerGamma, u.slowLayerGamma, u.developerExhaustion, 0
+                  );
+                  float3 localContrastDelta = filmDensity - neighborD;
+                  float3 interlayerShift = (netDensity - float3(meanDensity)) * (u.interlayerInhibition * 0.38f * u.dirStrength);
+                  float3 spatialEdgeBoost = localContrastDelta * (0.28f * u.dirStrength) - netDensity * (u.sameLayerInhibition * 0.08f * u.dirStrength);
+                  filmDensity = clamp(filmDensity + interlayerShift + spatialEdgeBoost, u.filmDmin, u.filmDmax);
+              }
+
+              if (u.enableGrain != 0 && u.grainStrength > 0.001f) {
+                  float3 normD = clamp((filmDensity - u.filmDmin) / max(u.filmDmax - u.filmDmin, float3(0.1f)), 0.0f, 1.0f);
+                  float3 crystalEnvelope = pow(normD * (1.0f - normD * 0.65f * clamp(u.uniformity, 0.2f, 2.0f)), float3(0.65f))
+                                         + float3(0.08f * u.densityFloor);
+                  float3 noiseCoarse = float3(
+                      rand_gaussian(gid / 2u, 0u, 0u, u.randomSeed),
+                      rand_gaussian(gid / 2u, 1u, 0u, u.randomSeed),
+                      rand_gaussian(gid / 2u, 2u, 0u, u.randomSeed)
+                  );
+                  float3 noiseFine = float3(
+                      rand_gaussian(gid, 0u, 1u, u.randomSeed),
+                      rand_gaussian(gid, 1u, 1u, u.randomSeed),
+                      rand_gaussian(gid, 2u, 1u, u.randomSeed)
+                  );
+                  float subMix = clamp(u.sublayerScale * 0.5f, 0.0f, 0.85f);
+                  float3 combinedNoise = mix(noiseCoarse, noiseFine, subMix);
+                  float rmsScale = u.filmBaseRMSGranularity * pow(max(u.granularity, 0.1f), 0.75f) * u.grainStrength * formatScale;
+                  filmDensity = clamp(filmDensity + combinedNoise * crystalEnvelope * rmsScale, u.filmDmin, u.filmDmax);
+              }
+
+              float3 filmTransmittance = pow(float3(10.0f), -(filmDensity - u.filmDmin));
+              float3 scannedLinearRGB;
+
+              if (u.printPaperID == 0 || u.processMode == 1 || u.filmIsReversal != 0) {
+                  if (u.filmIsReversal != 0) {
+                      scannedLinearRGB = pow(float3(10.0f), -(filmDensity - u.filmDmin));
+                  } else {
+                      float3 normNeg = clamp((filmDensity - u.filmDmin) / max(u.filmDmax - u.filmDmin, float3(0.1f)), 0.0f, 1.0f);
+                      scannedLinearRGB = pow(normNeg, float3(1.65f));
+                  }
+              } else {
+                  float autoCompEV = (u.autoPrintExposure != 0) ? (-u.filmExposureEV + u.pushPullStops) : 0.0f;
+                  float totalPrintEV = u.printExposureEV + autoCompEV;
+                  float3 dichroicFilter = float3(1.0f, exp2(-u.filtrationM * 0.025f), exp2(-u.filtrationY * 0.025f));
+                  float3 enlargerLight = filmTransmittance * dichroicFilter * exp2(totalPrintEV);
+
+                  if (u.preflashExposure > 0.0001f) {
+                      float3 preflashFilter = float3(1.0f, exp2(-u.preflashM * 0.025f), exp2(-u.preflashY * 0.025f));
+                      enlargerLight += preflashFilter * (u.preflashExposure * 0.08f);
+                  }
+
+                  float3 paperExposure;
+                  paperExposure.r = dot(u.paperCrossMatrixRow0, enlargerLight);
+                  paperExposure.g = dot(u.paperCrossMatrixRow1, enlargerLight);
+                  paperExposure.b = dot(u.paperCrossMatrixRow2, enlargerLight);
+                  paperExposure = max(paperExposure, float3(1e-6f));
+
+                  float3 paperLogE = -log10(paperExposure);
+                  float3 channelGamma = float3(u.printGammaR, u.printGammaG, u.printGammaB) * u.printGamma;
+                  float3 paperSpan = max(u.paperDmax - u.paperDmin, float3(0.2f));
+                  float3 paperX = (paperLogE - 0.42f) * u.paperSlope * channelGamma;
+                  float3 paperNorm = clamp(0.5f + 0.5f * tanh(paperX * 1.35f), 0.0f, 1.0f);
+                  float3 paperDensity = u.paperDmin + paperSpan * paperNorm;
+                  scannedLinearRGB = pow(float3(10.0f), -(paperDensity - u.paperDmin));
+
+                  if (u.enablePrintDiffusion != 0 && u.printDiffusionStrength > 0.001f) {
+                      float3 shadowSpread = scannedLinearRGB * (1.0f - 0.18f * u.printDiffusionStrength);
+                      scannedLinearRGB = mix(scannedLinearRGB, shadowSpread, clamp(u.printDiffusionStrength * 0.5f, 0.0f, 0.7f));
+                  }
+                  if (u.viewingGlare > 0.0001f) {
+                      scannedLinearRGB = scannedLinearRGB + float3(u.viewingGlare * 0.04f) * (1.0f - scannedLinearRGB);
+                  }
+              }
+
+              if (u.filmIsBlackAndWhite != 0) {
+                  float bwLuma = dot(scannedLinearRGB, float3(0.299f, 0.587f, 0.114f));
+                  float3 paperTint = float3(1.0f + u.filtrationY * 0.004f, 1.0f - u.filtrationM * 0.003f, 1.0f - u.filtrationY * 0.005f);
+                  scannedLinearRGB = float3(bwLuma) * clamp(paperTint, 0.75f, 1.25f);
+              }
+
+              if (abs(u.preCompressionBoost) > 0.001f) {
+                  scannedLinearRGB *= exp2(u.preCompressionBoost * 0.65f);
+              }
+              if (u.enableGamutCompression != 0) {
+                  scannedLinearRGB = apply_oklch_gamut_compression(scannedLinearRGB);
+              }
+              scannedLinearRGB *= max(u.postCompressionScale, 0.1f);
+
+              if (u.blackPointCorrection != 0 || u.whitePointCorrection != 0) {
+                  float bPt = (u.blackPointCorrection != 0) ? (u.blackLevel * 0.08f) : 0.0f;
+                  float wPt = (u.whitePointCorrection != 0) ? max(u.whiteLevel, 0.25f) : 1.0f;
+                  scannedLinearRGB = clamp((scannedLinearRGB - float3(bPt)) / max(wPt - bPt, 0.1f), 0.0f, 1.5f);
+              }
+
+              float totalSharpen = u.scannerSharpenStrength * 0.35f + (u.enableGrain != 0 ? u.recoveryStrength * 0.2f : 0.0f);
+              if (totalSharpen > 0.005f) {
+                  float sharpRad = max(u.scannerSharpenRadius, 1.0f);
+                  float3 localBlur = sample_spatial_blur(inTexture, texSampler, uv, texelSize, sharpRad);
+                  float3 detail = srgb_to_linear(srcPixel.rgb) - localBlur;
+                  scannedLinearRGB = max(scannedLinearRGB + detail * totalSharpen * 0.45f, float3(0.0f));
+              }
+
+              float3 finalOut = (u.outputColorSpace == 2) ? clamp(scannedLinearRGB, 0.0f, 1.0f) : linear_to_srgb(scannedLinearRGB);
+              outTexture.write(float4(finalOut, srcPixel.a), gid);
+          }
+          EOF_METAL
+          fi
+
+          # --------------------------------------------------------------------
+          # 3.2 Generate SwiftUI + Metal App (SpektrafilmIOSApp.swift) if absent
+          # --------------------------------------------------------------------
+          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ]; then
+            echo "Generating Sources/SpektrafilmIOSApp.swift inline..."
+            cat << 'EOF_SWIFT' > Sources/SpektrafilmIOSApp.swift
+          import SwiftUI
+          import Metal
+          import MetalKit
+          import CoreImage
+          import CoreImage.CIFilterBuiltins
+          import PhotosUI
+          import UniformTypeIdentifiers
+
+          struct SpektrafilmUniforms {
+              var filmStockID: Int32 = 0
+              var printPaperID: Int32 = 1
+              var processMode: Int32 = 0
+              var frameLongEdgeMM: Float = 36.0
+
+              var wbTemperatureOffset: Float = 0.0
+              var wbTintOffset: Float = 0.0
+              var balanceToFilmStock: Int32 = 1
+
+              var filmExposureEV: Float = 0.0
+              var pushPullStops: Float = 0.0
+              var developmentGamma: Float = 1.0
+              var fastLayerGamma: Float = 1.0
+              var slowLayerGamma: Float = 1.0
+              var developerExhaustion: Float = 0.0
+              var dirStrength: Float = 1.0
+              var sameLayerInhibition: Float = 0.5
+              var interlayerInhibition: Float = 1.0
+              var inhibitorSpreadUm: Float = 20.0
+              var enableCameraDiffusion: Int32 = 0
+              var cameraDiffusionType: Int32 = 0
+              var cameraDiffusionStrength: Float = 0.25
+              var cameraDiffusionSize: Float = 1.0
+              var cameraDiffusionWarmth: Float = 0.0
+
+              var enableHalationScatter: Int32 = 1
+              var scatterAmount: Float = 1.0
+              var scatterSize: Float = 1.0
+              var halationStrength: Float = 1.0
+              var halationSize: Float = 1.0
+              var highlightBoostEV: Float = 0.0
+              var boostRange: Float = 1.5
+              var boostProtectStops: Float = 1.0
+
+              var printExposureEV: Float = 0.0
+              var autoPrintExposure: Int32 = 1
+              var printGamma: Float = 1.0
+              var printGammaR: Float = 1.0
+              var printGammaG: Float = 1.0
+              var printGammaB: Float = 1.0
+              var filtrationM: Float = 0.0
+              var filtrationY: Float = 0.0
+              var preflashExposure: Float = 0.0
+              var preflashM: Float = 0.0
+              var preflashY: Float = 0.0
+              var enablePrintDiffusion: Int32 = 0
+              var printDiffusionStrength: Float = 0.25
+              var printDiffusionSize: Float = 1.0
+              var printDiffusionWarmth: Float = 0.0
+
+              var enableGrain: Int32 = 1
+              var granularity: Float = 1.0
+              var grainStrength: Float = 1.0
+              var uniformity: Float = 1.0
+              var sublayerScale: Float = 0.65
+              var densityFloor: Float = 1.0
+              var grainBlur: Float = 0.89
+              var dyeCloudSize: Float = 1.0
+              var recoveryRadius: Float = 1.2
+              var recoveryStrength: Float = 0.65
+              var randomSeed: UInt32 = 1337
+
+              var enableGamutCompression: Int32 = 1
+              var preCompressionBoost: Float = 0.0
+              var postCompressionScale: Float = 1.0
+              var scannerBlur: Float = 0.0
+              var scannerSharpenRadius: Float = 1.2
+              var scannerSharpenStrength: Float = 0.25
+              var viewingGlare: Float = 0.05
+              var blackPointCorrection: Int32 = 0
+              var blackLevel: Float = 0.0
+              var whitePointCorrection: Int32 = 0
+              var whiteLevel: Float = 1.0
+              var outputColorSpace: Int32 = 0
+              var splitPreviewMode: Int32 = 0
+              var splitPosition: Float = 0.5
+
+              var filmDmin: SIMD3<Float> = SIMD3<Float>(0.12, 0.48, 0.78)
+              var filmDmax: SIMD3<Float> = SIMD3<Float>(2.15, 2.55, 2.85)
+              var filmSlope: SIMD3<Float> = SIMD3<Float>(0.68, 0.72, 0.74)
+              var filmSensShift: SIMD3<Float> = SIMD3<Float>(0.0, 0.0, 0.0)
+              var filmHalationRatio: SIMD3<Float> = SIMD3<Float>(0.035, 0.004, 0.001)
+              var filmBaseRMSGranularity: Float = 0.036
+              var filmIsReversal: Int32 = 0
+              var filmIsBlackAndWhite: Int32 = 0
+              var filmIsTungsten: Int32 = 0
+
+              var paperDmin: SIMD3<Float> = SIMD3<Float>(0.04, 0.04, 0.05)
+              var paperDmax: SIMD3<Float> = SIMD3<Float>(2.35, 2.38, 2.32)
+              var paperSlope: SIMD3<Float> = SIMD3<Float>(2.45, 2.48, 2.42)
+              var paperCrossMatrixRow0: SIMD3<Float> = SIMD3<Float>(0.96, 0.03, 0.01)
+              var paperCrossMatrixRow1: SIMD3<Float> = SIMD3<Float>(0.02, 0.95, 0.03)
+              var paperCrossMatrixRow2: SIMD3<Float> = SIMD3<Float>(0.01, 0.03, 0.96)
+
+              var filmMatrixRow0: SIMD3<Float> = SIMD3<Float>(0.88, 0.10, 0.02)
+              var filmMatrixRow1: SIMD3<Float> = SIMD3<Float>(0.05, 0.87, 0.08)
+              var filmMatrixRow2: SIMD3<Float> = SIMD3<Float>(0.02, 0.11, 0.87)
+          }
+
+          struct FilmStockProfile: Identifiable, Hashable {
+              let id: Int32
+              let slug: String
+              let name: String
+              let iso: Int
+              let defaultPaperID: Int32
+              let dmin: SIMD3<Float>
+              let dmax: SIMD3<Float>
+              let slope: SIMD3<Float>
+              let sensShift: SIMD3<Float>
+              let halationRatio: SIMD3<Float>
+              let rmsGranularity: Float
+              let isReversal: Bool
+              let isBlackAndWhite: Bool
+              let isTungsten: Bool
+          }
+
+          struct PrintPaperProfile: Identifiable, Hashable {
+              let id: Int32
+              let slug: String
+              let name: String
+              let dmin: SIMD3<Float>
+              let dmax: SIMD3<Float>
+              let slope: SIMD3<Float>
+          }
+
+          struct FilmFormatGauge: Identifiable, Hashable {
+              let id: String
+              let name: String
+              let longEdgeMM: Float
+          }
+
+          enum SpektrafilmCatalog {
+              static let filmFormats: [FilmFormatGauge] = [
+                  FilmFormatGauge(id: "super8", name: "Super 8 (5.79 mm)", longEdgeMM: 5.79),
+                  FilmFormatGauge(id: "16mm", name: "16mm (10.26 mm)", longEdgeMM: 10.26),
+                  FilmFormatGauge(id: "halfframe", name: "Half-Frame (24 mm)", longEdgeMM: 24.0),
+                  FilmFormatGauge(id: "35mm", name: "35mm Full Frame (36 mm)", longEdgeMM: 36.0),
+                  FilmFormatGauge(id: "6x6", name: "Medium Format 6x6 (56 mm)", longEdgeMM: 56.0),
+                  FilmFormatGauge(id: "6x7", name: "Medium Format 6x7 (70 mm)", longEdgeMM: 70.0),
+                  FilmFormatGauge(id: "65mm_imax", name: "IMAX 65mm 15-perf (70.4 mm)", longEdgeMM: 70.41),
+                  FilmFormatGauge(id: "4x5", name: "Large Format 4x5 (120 mm)", longEdgeMM: 120.0)
+              ]
+
+              static let printPapers: [PrintPaperProfile] = [
+                  PrintPaperProfile(id: 0, slug: "none", name: "None (Direct Film Scan)", dmin: SIMD3(0,0,0), dmax: SIMD3(1,1,1), slope: SIMD3(1,1,1)),
+                  PrintPaperProfile(id: 1, slug: "kodak_portra_endura", name: "Kodak Portra Endura", dmin: SIMD3(0.04,0.04,0.05), dmax: SIMD3(2.32,2.36,2.30), slope: SIMD3(2.35,2.38,2.32)),
+                  PrintPaperProfile(id: 2, slug: "kodak_supra_endura", name: "Kodak Supra Endura", dmin: SIMD3(0.04,0.04,0.05), dmax: SIMD3(2.42,2.45,2.38), slope: SIMD3(2.58,2.60,2.54)),
+                  PrintPaperProfile(id: 3, slug: "kodak_endura_premier", name: "Kodak Endura Premier", dmin: SIMD3(0.03,0.04,0.04), dmax: SIMD3(2.48,2.50,2.45), slope: SIMD3(2.68,2.70,2.64)),
+                  PrintPaperProfile(id: 4, slug: "kodak_ektacolor_edge", name: "Kodak Ektacolor Edge", dmin: SIMD3(0.04,0.04,0.05), dmax: SIMD3(2.45,2.46,2.40), slope: SIMD3(2.62,2.64,2.58)),
+                  PrintPaperProfile(id: 5, slug: "fujifilm_crystal_archive_typeii", name: "Fujifilm Crystal Archive Type II", dmin: SIMD3(0.04,0.04,0.05), dmax: SIMD3(2.44,2.48,2.42), slope: SIMD3(2.55,2.60,2.52)),
+                  PrintPaperProfile(id: 6, slug: "kodak_2383", name: "Kodak Vision Color Print 2383", dmin: SIMD3(0.05,0.06,0.07), dmax: SIMD3(3.15,3.20,3.10), slope: SIMD3(2.95,3.00,2.90)),
+                  PrintPaperProfile(id: 7, slug: "kodak_2393", name: "Kodak Vision Premier 2393", dmin: SIMD3(0.05,0.05,0.06), dmax: SIMD3(3.30,3.35,3.25), slope: SIMD3(3.08,3.12,3.02)),
+                  PrintPaperProfile(id: 8, slug: "kodak_2302", name: "Kodak B&W Print Film 2302", dmin: SIMD3(0.04,0.04,0.04), dmax: SIMD3(2.85,2.85,2.85), slope: SIMD3(2.75,2.75,2.75))
+              ]
+
+              static let filmStocks: [FilmStockProfile] = [
+                  FilmStockProfile(id: 0, slug: "kodak_portra_400", name: "Kodak Portra 400", iso: 400, defaultPaperID: 1, dmin: SIMD3(0.14,0.52,0.82), dmax: SIMD3(2.12,2.52,2.82), slope: SIMD3(0.66,0.70,0.72), sensShift: SIMD3(0.02,0.0,-0.01), halationRatio: SIMD3(0.032,0.004,0.001), rmsGranularity: 0.034, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 1, slug: "kodak_portra_160", name: "Kodak Portra 160", iso: 160, defaultPaperID: 1, dmin: SIMD3(0.13,0.50,0.80), dmax: SIMD3(2.08,2.48,2.78), slope: SIMD3(0.64,0.68,0.70), sensShift: SIMD3(0.01,0.0,0.0), halationRatio: SIMD3(0.028,0.003,0.001), rmsGranularity: 0.026, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 2, slug: "kodak_portra_800", name: "Kodak Portra 800", iso: 800, defaultPaperID: 1, dmin: SIMD3(0.15,0.54,0.85), dmax: SIMD3(2.18,2.58,2.88), slope: SIMD3(0.70,0.74,0.76), sensShift: SIMD3(0.03,0.01,-0.02), halationRatio: SIMD3(0.045,0.006,0.002), rmsGranularity: 0.046, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 3, slug: "kodak_gold_200", name: "Kodak Gold 200", iso: 200, defaultPaperID: 3, dmin: SIMD3(0.15,0.55,0.86), dmax: SIMD3(2.22,2.62,2.92), slope: SIMD3(0.74,0.76,0.78), sensShift: SIMD3(0.05,0.02,-0.03), halationRatio: SIMD3(0.110,0.015,0.004), rmsGranularity: 0.038, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 4, slug: "kodak_ultramax_400", name: "Kodak UltraMax 400", iso: 400, defaultPaperID: 3, dmin: SIMD3(0.16,0.56,0.88), dmax: SIMD3(2.25,2.65,2.95), slope: SIMD3(0.76,0.78,0.80), sensShift: SIMD3(0.04,0.01,-0.02), halationRatio: SIMD3(0.120,0.018,0.005), rmsGranularity: 0.048, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 5, slug: "kodak_ektar_100", name: "Kodak Ektar 100", iso: 100, defaultPaperID: 2, dmin: SIMD3(0.13,0.50,0.80), dmax: SIMD3(2.28,2.68,2.98), slope: SIMD3(0.78,0.80,0.82), sensShift: SIMD3(0.03,-0.01,0.02), halationRatio: SIMD3(0.030,0.003,0.001), rmsGranularity: 0.022, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 6, slug: "fujifilm_pro_400h", name: "Fujifilm Pro 400H", iso: 400, defaultPaperID: 5, dmin: SIMD3(0.14,0.51,0.81), dmax: SIMD3(2.14,2.56,2.86), slope: SIMD3(0.68,0.73,0.75), sensShift: SIMD3(-0.02,0.03,0.02), halationRatio: SIMD3(0.035,0.005,0.002), rmsGranularity: 0.035, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 7, slug: "fujifilm_c200", name: "Fujifilm C200", iso: 200, defaultPaperID: 5, dmin: SIMD3(0.15,0.53,0.84), dmax: SIMD3(2.20,2.60,2.90), slope: SIMD3(0.73,0.76,0.78), sensShift: SIMD3(0.01,0.03,0.01), halationRatio: SIMD3(0.085,0.012,0.003), rmsGranularity: 0.037, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 8, slug: "kodak_vision3_50d", name: "Kodak Vision3 50D", iso: 50, defaultPaperID: 6, dmin: SIMD3(0.12,0.48,0.76), dmax: SIMD3(2.05,2.45,2.75), slope: SIMD3(0.62,0.65,0.67), sensShift: SIMD3(0,0,0), halationRatio: SIMD3(0.020,0.002,0.001), rmsGranularity: 0.020, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 9, slug: "kodak_vision3_250d", name: "Kodak Vision3 250D", iso: 250, defaultPaperID: 6, dmin: SIMD3(0.13,0.50,0.79), dmax: SIMD3(2.10,2.50,2.80), slope: SIMD3(0.64,0.67,0.69), sensShift: SIMD3(0.01,0,0), halationRatio: SIMD3(0.025,0.003,0.001), rmsGranularity: 0.030, isReversal: false, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 10, slug: "kodak_vision3_500t", name: "Kodak Vision3 500T / 800T", iso: 500, defaultPaperID: 6, dmin: SIMD3(0.14,0.52,0.83), dmax: SIMD3(2.14,2.54,2.86), slope: SIMD3(0.66,0.69,0.72), sensShift: SIMD3(-0.05,0.0,0.06), halationRatio: SIMD3(0.145,0.022,0.005), rmsGranularity: 0.041, isReversal: false, isBlackAndWhite: false, isTungsten: true),
+                  FilmStockProfile(id: 11, slug: "kodak_ektachrome_100", name: "Kodak Ektachrome E100", iso: 100, defaultPaperID: 0, dmin: SIMD3(0.08,0.09,0.10), dmax: SIMD3(3.10,3.15,3.08), slope: SIMD3(1.65,1.68,1.64), sensShift: SIMD3(0,0,0.01), halationRatio: SIMD3(0.022,0.003,0.001), rmsGranularity: 0.024, isReversal: true, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 12, slug: "fujifilm_velvia_100", name: "Fujifilm Velvia 100", iso: 100, defaultPaperID: 0, dmin: SIMD3(0.07,0.08,0.09), dmax: SIMD3(3.40,3.45,3.38), slope: SIMD3(1.98,2.02,1.95), sensShift: SIMD3(0.03,-0.01,0.02), halationRatio: SIMD3(0.025,0.003,0.001), rmsGranularity: 0.025, isReversal: true, isBlackAndWhite: false, isTungsten: false),
+                  FilmStockProfile(id: 13, slug: "kodak_double_x", name: "Kodak Eastman Double-X 5222", iso: 250, defaultPaperID: 8, dmin: SIMD3(0.18,0.18,0.18), dmax: SIMD3(2.25,2.25,2.25), slope: SIMD3(0.72,0.72,0.72), sensShift: SIMD3(0,0,0), halationRatio: SIMD3(0.065,0.065,0.065), rmsGranularity: 0.044, isReversal: false, isBlackAndWhite: true, isTungsten: false),
+                  FilmStockProfile(id: 14, slug: "kodak_tri_x_400", name: "Kodak Tri-X 400", iso: 400, defaultPaperID: 8, dmin: SIMD3(0.20,0.20,0.20), dmax: SIMD3(2.35,2.35,2.35), slope: SIMD3(0.78,0.78,0.78), sensShift: SIMD3(0,0,0), halationRatio: SIMD3(0.055,0.055,0.055), rmsGranularity: 0.050, isReversal: false, isBlackAndWhite: true, isTungsten: false)
+              ]
+          }
+
+          @MainActor
+          final class SpektrafilmViewModel: ObservableObject {
+              @Published var uniforms = SpektrafilmUniforms()
+              @Published var selectedFilmIndex: Int = 0 { didSet { applySelectedFilmStock() } }
+              @Published var selectedPaperIndex: Int = 1 { didSet { applySelectedPrintPaper() } }
+              @Published var selectedFormatIndex: Int = 3 {
+                  didSet { uniforms.frameLongEdgeMM = SpektrafilmCatalog.filmFormats[selectedFormatIndex].longEdgeMM }
+              }
+              @Published var renderedUIImage: UIImage?
+              @Published var imageMetadataSummary: String = "Spectral ColorChecker & 14-Stop Halation Target"
+              @Published var statusBanner: String?
+
+              let device: MTLDevice?
+              private let commandQueue: MTLCommandQueue?
+              private var pipelineState: MTLComputePipelineState?
+              private var sourceTexture: MTLTexture?
+
+              init() {
+                  let dev = MTLCreateSystemDefaultDevice()
+                  self.device = dev
+                  self.commandQueue = dev?.makeCommandQueue()
+                  if let dev = dev,
+                     let library = dev.makeDefaultLibrary(),
+                     let kernelFunc = library.makeFunction(name: "spektrafilm_pipeline") {
+                      self.pipelineState = try? dev.makeComputePipelineState(function: kernelFunc)
+                  }
+                  applySelectedFilmStock()
+                  let demoImage = Self.generateBuiltInTestScene(width: 1284, height: 960)
+                  loadCGImage(demoImage, label: "Spectral ColorChecker & Gradation Target")
+              }
+
+              func applySelectedFilmStock() {
+                  let stock = SpektrafilmCatalog.filmStocks[selectedFilmIndex]
+                  uniforms.filmStockID = stock.id
+                  uniforms.filmDmin = stock.dmin
+                  uniforms.filmDmax = stock.dmax
+                  uniforms.filmSlope = stock.slope
+                  uniforms.filmSensShift = stock.sensShift
+                  uniforms.filmHalationRatio = stock.halationRatio
+                  uniforms.filmBaseRMSGranularity = stock.rmsGranularity
+                  uniforms.filmIsReversal = stock.isReversal ? 1 : 0
+                  uniforms.filmIsBlackAndWhite = stock.isBlackAndWhite ? 1 : 0
+                  uniforms.filmIsTungsten = stock.isTungsten ? 1 : 0
+                  if stock.isReversal {
+                      selectedPaperIndex = 0
+                  } else if let idx = SpektrafilmCatalog.printPapers.firstIndex(where: { $0.id == stock.defaultPaperID }) {
+                      selectedPaperIndex = idx
+                  }
+                  applySelectedPrintPaper()
+                  renderSimulation()
+              }
+
+              func applySelectedPrintPaper() {
+                  let paper = SpektrafilmCatalog.printPapers[selectedPaperIndex]
+                  uniforms.printPaperID = paper.id
+                  uniforms.paperDmin = paper.dmin
+                  uniforms.paperDmax = paper.dmax
+                  uniforms.paperSlope = paper.slope
+                  renderSimulation()
+              }
+
+              func loadPhotoData(_ data: Data, filename: String = "Imported Photo") {
+                  if let rawFilter = CIRAWFilter(imageData: data, identifierHint: nil) {
+                      rawFilter.isGamutMappingEnabled = false
+                      rawFilter.baselineExposure = 0.0
+                      rawFilter.boostAmount = 0.0
+                      if let ciOut = rawFilter.outputImage {
+                          let ctx = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) as Any])
+                          if let cgImg = ctx.createCGImage(ciOut, from: ciOut.extent) {
+                              loadCGImage(cgImg, label: "ProRAW/DNG Linear (\(Int(ciOut.extent.width))×\(Int(ciOut.extent.height)))")
+                              return
+                          }
+                      }
+                  }
+                  if let uiImg = UIImage(data: data), let cgImg = uiImg.cgImage {
+                      loadCGImage(cgImg, label: "\(filename) (\(cgImg.width)×\(cgImg.height))")
+                  }
+              }
+
+              func loadCGImage(_ cgImage: CGImage, label: String) {
+                  self.imageMetadataSummary = label
+                  guard let dev = device else { return }
+                  let loader = MTKTextureLoader(device: dev)
+                  self.sourceTexture = try? loader.newTexture(cgImage: cgImage, options: [
+                      .SRGB: false,
+                      .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue)
+                  ])
+                  renderSimulation()
+              }
+
+              func renderSimulation() {
+                  guard let dev = device, let queue = commandQueue, let pipeline = pipelineState, let inTex = sourceTexture else { return }
+                  let width = inTex.width
+                  let height = inTex.height
+                  let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+                  desc.usage = [.shaderWrite, .shaderRead]
+                  guard let outTex = dev.makeTexture(descriptor: desc),
+                        let cmdBuf = queue.makeCommandBuffer(),
+                        let encoder = cmdBuf.makeComputeCommandEncoder() else { return }
+
+                  var u = uniforms
+                  encoder.setComputePipelineState(pipeline)
+                  encoder.setTexture(inTex, index: 0)
+                  encoder.setTexture(outTex, index: 1)
+                  encoder.setBytes(&u, length: MemoryLayout<SpektrafilmUniforms>.stride, index: 0)
+
+                  let w = pipeline.threadExecutionWidth
+                  let h = max(pipeline.maxTotalThreadsPerThreadgroup / w, 1)
+                  encoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1),
+                                          threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
+                  encoder.endEncoding()
+                  cmdBuf.commit()
+                  cmdBuf.waitUntilCompleted()
+
+                  if let ciImage = CIImage(mtlTexture: outTex, options: [.colorSpace: CGColorSpace(name: CGColorSpace.displayP3) as Any]) {
+                      let flipped = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -ciImage.extent.height))
+                      let ctx = CIContext()
+                      if let cgOut = ctx.createCGImage(flipped, from: flipped.extent) {
+                          self.renderedUIImage = UIImage(cgImage: cgOut)
+                      }
+                  }
+              }
+
+              static func generateBuiltInTestScene(width: Int, height: Int) -> CGImage {
+                  let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+                  let img = renderer.image { ctx in
+                      let cg = ctx.cgContext
+                      let colors = [
+                          UIColor(red: 0.14, green: 0.24, blue: 0.44, alpha: 1.0).cgColor,
+                          UIColor(red: 0.85, green: 0.58, blue: 0.36, alpha: 1.0).cgColor,
+                          UIColor(red: 0.12, green: 0.11, blue: 0.10, alpha: 1.0).cgColor
+                      ] as CFArray
+                      if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 0.55, 1.0]) {
+                          cg.drawLinearGradient(grad, start: .zero, end: CGPoint(x: 0, y: height), options: [])
+                      }
+                      for i in 0..<14 {
+                          let b = CGFloat(min(1.0, 0.25 + Double(i) * 0.065))
+                          cg.setFillColor(UIColor(white: b, alpha: 1.0).cgColor)
+                          cg.fillEllipse(in: CGRect(x: CGFloat(62 + i * 82), y: 55, width: 36, height: 36))
+                      }
+                      let patches: [(CGFloat, CGFloat, CGFloat)] = [
+                          (0.45,0.32,0.27),(0.76,0.58,0.50),(0.38,0.48,0.62),(0.34,0.42,0.26),(0.52,0.50,0.69),(0.40,0.74,0.67),
+                          (0.84,0.49,0.17),(0.31,0.36,0.65),(0.76,0.33,0.39),(0.37,0.24,0.42),(0.62,0.74,0.25),(0.88,0.64,0.18),
+                          (0.22,0.24,0.59),(0.27,0.58,0.29),(0.69,0.21,0.24),(0.91,0.78,0.12),(0.73,0.34,0.58),(0.03,0.53,0.65),
+                          (0.95,0.95,0.94),(0.78,0.78,0.78),(0.63,0.63,0.63),(0.48,0.48,0.48),(0.33,0.33,0.33),(0.18,0.18,0.18)
+                      ]
+                      let startX: CGFloat = (CGFloat(width) - 6.0 * 174.0) * 0.5
+                      for r in 0..<4 {
+                          for c in 0..<6 {
+                              let p = patches[r * 6 + c]
+                              cg.setFillColor(UIColor(red: p.0, green: p.1, blue: p.2, alpha: 1.0).cgColor)
+                              cg.fill(CGRect(x: startX + CGFloat(c) * 174, y: 150 + CGFloat(r) * 134, width: 160, height: 120))
+                          }
+                      }
+                      let stepW = CGFloat(width - 120) / 32.0
+                      for s in 0..<32 {
+                          let v = CGFloat(s) / 31.0
+                          cg.setFillColor(UIColor(white: v, alpha: 1.0).cgColor)
+                          cg.fill(CGRect(x: 60 + CGFloat(s) * stepW, y: 730, width: stepW + 1, height: 140))
+                      }
+                  }
+                  return img.cgImage!
+              }
+          }
+
+          enum DarkroomStageTab: String, CaseIterable, Identifiable {
+              case film = "Film", print = "Print", grain = "Grain", halation = "Halation", scanner = "Scanner"
+              var id: String { rawValue }
+          }
+
+          struct ContentView: View {
+              @StateObject private var vm = SpektrafilmViewModel()
+              @State private var activeTab: DarkroomStageTab = .film
+              @State private var selectedPhotoItem: PhotosPickerItem?
+
+              var body: some View {
+                  NavigationStack {
+                      VStack(spacing: 0) {
+                          HStack {
+                              Picker("Film", selection: $vm.selectedFilmIndex) {
+                                  ForEach(Array(SpektrafilmCatalog.filmStocks.enumerated()), id: \.offset) { idx, s in
+                                      Text(s.name).tag(idx)
+                                  }
+                              }
+                              Picker("Paper", selection: $vm.selectedPaperIndex) {
+                                  ForEach(Array(SpektrafilmCatalog.printPapers.enumerated()), id: \.offset) { idx, p in
+                                      Text(p.name).tag(idx)
+                                  }
+                              }
+                              Picker("Format", selection: $vm.selectedFormatIndex) {
+                                  ForEach(Array(SpektrafilmCatalog.filmFormats.enumerated()), id: \.offset) { idx, f in
+                                      Text(f.name).tag(idx)
+                                  }
+                              }
+                          }
+                          .padding(.horizontal, 8)
+                          .padding(.vertical, 6)
+
+                          ZStack {
+                              Color.black
+                              if let img = vm.renderedUIImage {
+                                  Image(uiImage: img)
+                                      .resizable()
+                                      .scaledToFit()
+                              }
+                          }
+                          .frame(height: 280)
+
+                          Picker("Stage", selection: $activeTab) {
+                              ForEach(DarkroomStageTab.allCases) { tab in
+                                  Text(tab.rawValue).tag(tab)
+                              }
+                          }
+                          .pickerStyle(.segmented)
+                          .padding(8)
+
+                          ScrollView {
+                              VStack(spacing: 12) {
+                                  switch activeTab {
+                                  case .film:
+                                      sliderRow("Film Exposure (EV)", value: $vm.uniforms.filmExposureEV, range: -4...4)
+                                      sliderRow("Push / Pull (Stops)", value: $vm.uniforms.pushPullStops, range: -2...3)
+                                      sliderRow("Development Gamma", value: $vm.uniforms.developmentGamma, range: 0.5...1.6)
+                                      sliderRow("DIR Couplers Strength", value: $vm.uniforms.dirStrength, range: 0...1)
+                                      sliderRow("Interlayer Saturation", value: $vm.uniforms.interlayerInhibition, range: 0...2)
+                                      sliderRow("Inhibitor Spread (µm)", value: $vm.uniforms.inhibitorSpreadUm, range: 2...80)
+                                  case .print:
+                                      sliderRow("Print Exposure Offset (EV)", value: $vm.uniforms.printExposureEV, range: -3...3)
+                                      sliderRow("Filtration Magenta (M)", value: $vm.uniforms.filtrationM, range: -40...40)
+                                      sliderRow("Filtration Yellow (Y)", value: $vm.uniforms.filtrationY, range: -40...40)
+                                      sliderRow("Print Contrast Gamma", value: $vm.uniforms.printGamma, range: 0.5...1.6)
+                                      sliderRow("Preflash Exposure", value: $vm.uniforms.preflashExposure, range: 0...1)
+                                  case .grain:
+                                      sliderRow("Granularity (Crystal Size)", value: $vm.uniforms.granularity, range: 0.2...3.0)
+                                      sliderRow("Grain Strength", value: $vm.uniforms.grainStrength, range: 0...4)
+                                      sliderRow("Crystal Uniformity", value: $vm.uniforms.uniformity, range: 0.2...2.0)
+                                      sliderRow("Recovery Sharpening", value: $vm.uniforms.recoveryStrength, range: 0...2)
+                                  case .halation:
+                                      sliderRow("Sideways Scatter Amount", value: $vm.uniforms.scatterAmount, range: 0...2.5)
+                                      sliderRow("Red Halation Strength", value: $vm.uniforms.halationStrength, range: 0...4.0)
+                                      sliderRow("Halation Size Scale", value: $vm.uniforms.halationSize, range: 0.2...3.0)
+                                      sliderRow("Highlight Boost (EV)", value: $vm.uniforms.highlightBoostEV, range: 0...3.0)
+                                  case .scanner:
+                                      sliderRow("Pre-Compression Boost", value: $vm.uniforms.preCompressionBoost, range: -2...2)
+                                      sliderRow("Post-Compression Scale", value: $vm.uniforms.postCompressionScale, range: 0.5...1.5)
+                                      sliderRow("Scanner Sharpen Strength", value: $vm.uniforms.scannerSharpenStrength, range: 0...2.0)
+                                      sliderRow("Print Viewing Glare", value: $vm.uniforms.viewingGlare, range: 0...1.0)
+                                  }
+                              }
+                              .padding(16)
+                          }
+                      }
+                      .navigationTitle("spektrafilm iOS")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .topBarLeading) {
+                              PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                                  Image(systemName: "photo.on.rectangle")
+                              }
+                          }
+                          ToolbarItem(placement: .topBarTrailing) {
+                              Button {
+                                  vm.uniforms.splitPreviewMode = (vm.uniforms.splitPreviewMode == 0) ? 1 : 0
+                                  vm.renderSimulation()
+                              } label: {
+                                  Image(systemName: "rectangle.split.2x1")
+                              }
+                          }
+                      }
+                      .onChange(of: selectedPhotoItem) { newItem in
+                          guard let newItem else { return }
+                          Task {
+                              if let data = try? await newItem.loadTransferable(type: Data.self) {
+                                  vm.loadPhotoData(data)
+                              }
+                          }
+                      }
+                  }
+                  .preferredColorScheme(.dark)
+              }
+
+              private func sliderRow(_ label: String, value: Binding<Float>, range: ClosedRange<Float>) -> some View {
+                  VStack(alignment: .leading, spacing: 2) {
+                      HStack {
+                          Text(label).font(.caption)
+                          Spacer()
+                          Text(String(format: "%.2f", value.wrappedValue)).font(.caption.monospacedDigit()).foregroundStyle(.orange)
+                      }
+                      Slider(value: Binding(
+                          get: { value.wrappedValue },
+                          set: { value.wrappedValue = $0; vm.renderSimulation() }
+                      ), in: range)
+                      .tint(.orange)
+                  }
+              }
+          }
+
+          @main
+          struct SpektrafilmIOSApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                  }
+              }
+          }
+          EOF_SWIFT
+          fi
+
+          # --------------------------------------------------------------------
+          # 3.3 Generate Info.plist (ProMotion 120Hz & Photo Library Permissions)
+          # --------------------------------------------------------------------
+          cat << 'EOF_PLIST' > Resources/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>Spektrafilm</string>
+              <key>CFBundleExecutable</key>
+              <string>$(EXECUTABLE_NAME)</string>
+              <key>CFBundleIdentifier</key>
+              <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>$(PRODUCT_NAME)</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.3.3</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>CADisableMinimumFrameDurationOnPhone</key>
+              <true/>
+              <key>NSPhotoLibraryUsageDescription</key>
+              <string>Spektrafilm needs access to your Photo Library to import RAW/DNG and photos for spectral film simulation.</string>
+              <key>NSPhotoLibraryAddUsageDescription</key>
+              <string>Spektrafilm needs permission to save simulated darkroom prints to your Photo Library.</string>
+              <key>UIApplicationSceneManifest</key>
+              <dict>
+                  <key>UIApplicationSupportsMultipleScenes</key>
+                  <false/>
+              </dict>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+                  <string>metal</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF_PLIST
+
+          # --------------------------------------------------------------------
+          # 3.4 Generate XcodeGen project.yml targeting iPhone 13 Pro Max (arm64)
+          # --------------------------------------------------------------------
+          DEPLOY_TARGET="${{ github.event.inputs.ios_deployment_target || '16.0' }}"
+          cat << EOF_PROJ > project.yml
+          name: Spektrafilm
+          options:
+            bundleIdPrefix: org.pixls.spektrafilm
+            deploymentTarget:
+              iOS: "${DEPLOY_TARGET}"
+          settings:
+            base:
+              ARCHS: arm64
+              VALID_ARCHS: arm64
+              ONLY_ACTIVE_ARCH: NO
+              SWIFT_VERSION: "5.9"
+              TARGETED_DEVICE_FAMILY: "1,2"
+              MTL_ENABLE_DEBUG_INFO: NO
+              MTL_FAST_MATH: YES
+              CODE_SIGN_IDENTITY: ""
+              CODE_SIGNING_REQUIRED: NO
+              CODE_SIGNING_ALLOWED: NO
+          targets:
+            Spektrafilm:
+              type: application
+              platform: iOS
+              sources:
+                - path: Sources
+              info:
+                path: Resources/Info.plist
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_ID}
+                  PRODUCT_NAME: ${APP_NAME}
+                  ENABLE_PREVIEWS: NO
+          EOF_PROJ
+
+      - name: 4. Generate Xcode Project & Compile Unsigned iOS App (iPhone 13 Pro Max arm64)
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          xcodebuild clean build \
+            -project Spektrafilm.xcodeproj \
+            -scheme Spektrafilm \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_output \
+            ARCHS="arm64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: 5. Fake-Sign with ldid & Package Direct .ipa
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find build_output/Build/Products/Release-iphoneos -name "Spektrafilm.app" -type d | head -n 1)
+          echo "Located compiled bundle: ${APP_PATH}"
+
+          # Fake-sign binary with ldid for TrollStore / SideStore / AltStore / Sideloadly compatibility
+          ldid -S "${APP_PATH}/Spektrafilm"
+
+          mkdir -p Payload
+          cp -R "${APP_PATH}" Payload/
+          zip -qry Spektrafilm-iOS-iPhone13ProMax.ipa Payload
+
+          ls -lh Spektrafilm-iOS-iPhone13ProMax.ipa
+          shasum -a 256 Spektrafilm-iOS-iPhone13ProMax.ipa > Spektrafilm-iOS-iPhone13ProMax.ipa.sha256
+
+      - name: 6. Upload Uncompressed Artifact (Compression Level 0)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spektrafilm-iOS-iPhone13ProMax-IPA
+          path: |
+            Spektrafilm-iOS-iPhone13ProMax.ipa
+            Spektrafilm-iOS-iPhone13ProMax.ipa.sha256
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: 7. Publish Extraction-Free Direct .ipa to GitHub Releases (免解压直下)
+        if: ${{ github.event.inputs.publish_release_ipa != 'false' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "ios-build-${{ github.run_number }}"
+          name: "Spektrafilm iOS (iPhone 13 Pro Max arm64) Build #${{ github.run_number }}"
+          body: |
+            ### Spektrafilm iOS Native Port (iPhone 13 Pro Max / A15 Bionic Metal)
+            - **免解压直接安装**：在 iPhone 13 Pro Max 的 Safari 中直接点击下方 Assets 中的 `Spektrafilm-iOS-iPhone13ProMax.ipa` 即可直接下载 `.ipa` 原文件（无需二次解压 `.zip`），支持通过 **TrollStore / SideStore / AltStore / Sideloadly / 爱思助手** 一键签名或直装。
+            - **核心管线**：基于 [andreavolpato/spektrafilm](https://github.com/andreavolpato/spektrafilm) 光谱胶片模拟管线（负片 → 放大机二向色滤光 → 相纸冲印 → 扫描仪），内置 120Hz ProMotion 与 Apple ProRAW (`.dng`) 线性解码支持。
+          files: |
+            Spektrafilm-iOS-iPhone13ProMax.ipa
+            Spektrafilm-iOS-iPhone13ProMax.ipa.sha256
+          prerelease: true
+
+      - name: 8. Write Build & Direct Download Summary
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## Spektrafilm iOS (iPhone 13 Pro Max) 编译完成
+          - **目标硬件**：iPhone 13 Pro Max (`iPhone14,3`, Apple A15 Bionic 5-Core GPU, `arm64`, Display P3, 120Hz ProMotion)
+          - **免解压 `.ipa` 获取方式**：
+            1. **GitHub Releases 免解压直链（推荐）**：进入本仓库的 **Releases** 页面，直接点击 `Spektrafilm-iOS-iPhone13ProMax.ipa` 即可在 iPhone Safari 中免解压下载 `.ipa` 并导入 TrollStore / SideStore / AltStore。
+            2. **Actions Artifacts**：在当前运行页底部下载 `Spektrafilm-iOS-iPhone13ProMax-IPA`（已设为 0 压缩率快速打包）。
+          EOF
