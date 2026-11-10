@@ -3,13 +3,15 @@
 # 自包含免解压 GitHub Actions 编译工作流 (.github/workflows/build.yml)
 #
 # 更新说明：
-# 1. 【修复 macos-14 退役报错 (The configuration 'macos-14-arm64-us-default' is not supported)】：
-#    GitHub Actions 已于 2026 年 11 月 2 日正式停用并下线所有 `macos-14` 镜像。
-#    本工作流已迁移至当前受支持的 Apple Silicon 镜像 `macos-15`（同时支持在手动触发时
-#    切换为 `macos-latest` 或 `macos-26`），并开启 `HOMEBREW_NO_AUTO_UPDATE=1` 加速依赖安装。
-# 2. 【修复 21,000 字符表达式上限 (Exceeded max expression length 21000)】：
-#    移除所有 `run:` 块内的 `${{ ... }}` 表达式（改用 step 级 `env:` 传递），并将自包含源码
-#    拆分为 3a ~ 3f 共 6 个独立步骤（每步均严格小于 15,000 字符）。
+# 1. 【修复 Metal 编译器 `use of undeclared identifier 'cbrt'` 报错】：
+#    Apple Metal Shading Language (MSL) 标准库不包含 C99 的 `cbrt()` 函数。
+#    现已实现 `inline float metal_cbrt(float x) { return pow(max(x, 0.0f), 0.3333333333f); }`
+#    并在 `apply_oklch_gamut_compression` 中替换所有 `cbrt` 调用；同时若仓库已有旧版
+#    `SpektrafilmEngine.metal` 也会自动覆盖更新，确保 `CompileMetalFile` 一次通过。
+# 2. 【修复 macos-14 退役报错 (The configuration 'macos-14-arm64-us-default' is not supported)】：
+#    默认采用当前受支持的 `macos-15` Runner（支持手动切换 `macos-latest` / `macos-26`）。
+# 3. 【修复 21,000 字符表达式上限 (Exceeded max expression length 21000)】：
+#    移除所有 `run:` 块内的 `${{ ... }}` 表达式，并将自包含源码拆分为 3a ~ 3f 独立步骤。
 #
 # 上游致谢与开源许可 (GPL-3.0)：
 # - Film modeling powered by spektrafilm (Andrea Volpato): https://github.com/andreavolpato/spektrafilm
@@ -72,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Sources Resources
-          if [ ! -f "Sources/SpektrafilmEngine.metal" ]; then
+          if [ ! -f "Sources/SpektrafilmEngine.metal" ] || grep -q "cbrt(" "Sources/SpektrafilmEngine.metal"; then
           cat << 'EOF_METAL_1' > Sources/SpektrafilmEngine.metal
           //  SpektrafilmEngine.metal — iPhone 13 Pro Max (A15 Bionic 5-Core GPU)
           //  Film modeling powered by spektrafilm — https://github.com/andreavolpato/spektrafilm (GPL-3.0)
@@ -203,11 +205,15 @@ jobs:
               return dmin + span * normalized;
           }
 
+          inline float metal_cbrt(float x) {
+              return pow(max(x, 0.0f), 0.3333333333f);
+          }
+
           inline float3 apply_oklch_gamut_compression(float3 rgb) {
               float l = 0.4122214708f * rgb.r + 0.5363325363f * rgb.g + 0.0514459929f * rgb.b;
               float m = 0.2119034982f * rgb.r + 0.6806995451f * rgb.g + 0.1073969566f * rgb.b;
               float s = 0.0883024619f * rgb.r + 0.2817188376f * rgb.g + 0.6299787005f * rgb.b;
-              float l_ = cbrt(max(l, 0.0f)), m_ = cbrt(max(m, 0.0f)), s_ = cbrt(max(s, 0.0f));
+              float l_ = metal_cbrt(l), m_ = metal_cbrt(m), s_ = metal_cbrt(s);
               float L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_;
               float a = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_;
               float b = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_;
@@ -320,7 +326,7 @@ jobs:
                   float3 warmthTint = float3(1.0f + 0.18f * u.cameraDiffusionWarmth, 1.0f, 1.0f - 0.18f * u.cameraDiffusionWarmth);
                   float blendAmt = clamp(u.cameraDiffusionStrength * 0.45f, 0.0f, 0.85f);
                   if (u.cameraDiffusionType == 0) {
-                      sceneLinear = mix(sceneLinear, sceneLinear + max(halo - 0.12f, 0.0f) * warmthTint * 0.85f, blendAmt);
+                      sceneLinear = mix(sceneLinear, sceneLinear + max(halo - float3(0.12f), float3(0.0f)) * warmthTint * 0.85f, blendAmt);
                   } else if (u.cameraDiffusionType == 1) {
                       sceneLinear = mix(sceneLinear, halo * warmthTint, blendAmt * 0.65f);
                   } else {
@@ -429,7 +435,7 @@ jobs:
 
               if (u.filmIsBlackAndWhite != 0) {
                   float bwLuma = dot(scannedLinearRGB, float3(0.299f, 0.587f, 0.114f));
-                  float3 paperTint = clamp(float3(1.0f + u.filtrationY * 0.004f, 1.0f - u.filtrationM * 0.003f, 1.0f - u.filtrationY * 0.005f), 0.75f, 1.25f);
+                  float3 paperTint = clamp(float3(1.0f + u.filtrationY * 0.004f, 1.0f - u.filtrationM * 0.003f, 1.0f - u.filtrationY * 0.005f), float3(0.75f), float3(1.25f));
                   scannedLinearRGB = float3(bwLuma) * paperTint;
               }
 
