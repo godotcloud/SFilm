@@ -2,12 +2,14 @@
 # Spektrafilm iOS Native App — Self-Contained Extraction-Free GitHub Actions Workflow
 # 自包含免解压 GitHub Actions 编译工作流 (.github/workflows/build.yml)
 #
-# 修复说明 (Fix for Line 71 Exceeded max expression length 21000)：
-# - GitHub Actions 解析器在遇到包含 `${{ ... }}` 的 `run:` 块时，会将整个 `run:` 脚本
-#   转换为单个内部 `format()` 表达式，并强制执行 21,000 字符上限检查。
-# - 本版本将自包含源码生成拆分为 4 个独立子步骤（Metal 着色器、Swift 数据与渲染引擎、
-#   SwiftUI 暗房界面、Info.plist 与 XcodeGen 配置），彻底移除大脚本内的 `${{ ... }}`
-#   内联表达式（改用环境变量注入），且每个步骤的脚本长度均严格控制在 15,000 字符以内。
+# 更新说明：
+# 1. 【修复 macos-14 退役报错 (The configuration 'macos-14-arm64-us-default' is not supported)】：
+#    GitHub Actions 已于 2026 年 11 月 2 日正式停用并下线所有 `macos-14` 镜像。
+#    本工作流已迁移至当前受支持的 Apple Silicon 镜像 `macos-15`（同时支持在手动触发时
+#    切换为 `macos-latest` 或 `macos-26`），并开启 `HOMEBREW_NO_AUTO_UPDATE=1` 加速依赖安装。
+# 2. 【修复 21,000 字符表达式上限 (Exceeded max expression length 21000)】：
+#    移除所有 `run:` 块内的 `${{ ... }}` 表达式（改用 step 级 `env:` 传递），并将自包含源码
+#    拆分为 3a ~ 3f 共 6 个独立步骤（每步均严格小于 15,000 字符）。
 #
 # 上游致谢与开源许可 (GPL-3.0)：
 # - Film modeling powered by spektrafilm (Andrea Volpato): https://github.com/andreavolpato/spektrafilm
@@ -20,6 +22,10 @@ name: Build Spektrafilm iOS (iPhone 13 Pro Max Self-Contained)
 on:
   workflow_dispatch:
     inputs:
+      runner_os:
+        description: "GitHub Actions macOS Runner 镜像 (macos-15 / macos-latest / macos-26)"
+        required: false
+        default: "macos-15"
       ios_deployment_target:
         description: "iOS Deployment Target (iPhone 13 Pro Max 推荐 16.0 或 17.0)"
         required: false
@@ -42,31 +48,32 @@ env:
   APP_NAME: "Spektrafilm"
   BUNDLE_ID: "org.pixls.spektrafilm.ios"
   TARGET_DEVICE_MODEL: "iPhone14,3"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
   build-ios-ipa:
     name: Compile Native iOS App (arm64 / A15 Metal)
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner_os || 'macos-15' }}
 
     steps:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Install XcodeGen & ldid (Brew)
+      - name: 2. Install XcodeGen & ldid (Brew Fast Mode)
         run: |
           set -euo pipefail
           which xcodegen || brew install xcodegen
           which ldid || brew install ldid
           xcodebuild -version
 
-      - name: 3a. Generate Metal Spectral Shader (SpektrafilmEngine.metal)
+      - name: 3a. Generate Metal Structs & Math Helpers (Part 1)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p Sources Resources
           if [ ! -f "Sources/SpektrafilmEngine.metal" ]; then
-          echo "Generating Sources/SpektrafilmEngine.metal..."
-          cat << 'EOF_METAL' > Sources/SpektrafilmEngine.metal
+          cat << 'EOF_METAL_1' > Sources/SpektrafilmEngine.metal
           //  SpektrafilmEngine.metal — iPhone 13 Pro Max (A15 Bionic 5-Core GPU)
           //  Film modeling powered by spektrafilm — https://github.com/andreavolpato/spektrafilm (GPL-3.0)
           #include <metal_stdlib>
@@ -77,11 +84,9 @@ jobs:
               int printPaperID;
               int processMode;
               float frameLongEdgeMM;
-
               float wbTemperatureOffset;
               float wbTintOffset;
               int balanceToFilmStock;
-
               float filmExposureEV;
               float pushPullStops;
               float developmentGamma;
@@ -97,7 +102,6 @@ jobs:
               float cameraDiffusionStrength;
               float cameraDiffusionSize;
               float cameraDiffusionWarmth;
-
               int enableHalationScatter;
               float scatterAmount;
               float scatterSize;
@@ -106,7 +110,6 @@ jobs:
               float highlightBoostEV;
               float boostRange;
               float boostProtectStops;
-
               float printExposureEV;
               int autoPrintExposure;
               float printGamma;
@@ -122,7 +125,6 @@ jobs:
               float printDiffusionStrength;
               float printDiffusionSize;
               float printDiffusionWarmth;
-
               int enableGrain;
               float granularity;
               float grainStrength;
@@ -134,7 +136,6 @@ jobs:
               float recoveryRadius;
               float recoveryStrength;
               uint randomSeed;
-
               int enableGamutCompression;
               float preCompressionBoost;
               float postCompressionScale;
@@ -149,7 +150,6 @@ jobs:
               int outputColorSpace;
               int splitPreviewMode;
               float splitPosition;
-
               float3 filmDmin;
               float3 filmDmax;
               float3 filmSlope;
@@ -159,14 +159,12 @@ jobs:
               int filmIsReversal;
               int filmIsBlackAndWhite;
               int filmIsTungsten;
-
               float3 paperDmin;
               float3 paperDmax;
               float3 paperSlope;
               float3 paperCrossMatrixRow0;
               float3 paperCrossMatrixRow1;
               float3 paperCrossMatrixRow2;
-
               float3 filmMatrixRow0;
               float3 filmMatrixRow1;
               float3 filmMatrixRow2;
@@ -261,6 +259,15 @@ jobs:
               }
               return accum / weightSum;
           }
+          EOF_METAL_1
+          fi
+
+      - name: 3b. Append Metal Spectral Pipeline Kernel (Part 2)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q "kernel void spektrafilm_pipeline" Sources/SpektrafilmEngine.metal; then
+          cat << 'EOF_METAL_2' >> Sources/SpektrafilmEngine.metal
 
           kernel void spektrafilm_pipeline(
               texture2d<float, access::sample> inTexture [[texture(0)]],
@@ -445,32 +452,26 @@ jobs:
               float3 finalOut = (u.outputColorSpace == 2) ? clamp(scannedLinearRGB, 0.0f, 1.0f) : linear_to_srgb(scannedLinearRGB);
               outTexture.write(float4(finalOut, srcPixel.a), gid);
           }
-          EOF_METAL
+          EOF_METAL_2
           fi
 
-      - name: 3b. Generate Swift Data Catalog & Metal Renderer (SpektrafilmCore.swift)
+      - name: 3c. Generate Swift Film & Paper Catalog (SpektrafilmCatalog.swift)
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmCore.swift" ]; then
-          echo "Generating Sources/SpektrafilmCore.swift..."
-          cat << 'EOF_CORE' > Sources/SpektrafilmCore.swift
-          import SwiftUI
-          import Metal
-          import MetalKit
-          import CoreImage
-          import CoreImage.CIFilterBuiltins
+          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmCatalog.swift" ]; then
+          cat << 'EOF_CAT' > Sources/SpektrafilmCatalog.swift
+          import Foundation
+          import simd
 
           struct SpektrafilmUniforms {
               var filmStockID: Int32 = 0
               var printPaperID: Int32 = 1
               var processMode: Int32 = 0
               var frameLongEdgeMM: Float = 36.0
-
               var wbTemperatureOffset: Float = 0.0
               var wbTintOffset: Float = 0.0
               var balanceToFilmStock: Int32 = 1
-
               var filmExposureEV: Float = 0.0
               var pushPullStops: Float = 0.0
               var developmentGamma: Float = 1.0
@@ -486,7 +487,6 @@ jobs:
               var cameraDiffusionStrength: Float = 0.25
               var cameraDiffusionSize: Float = 1.0
               var cameraDiffusionWarmth: Float = 0.0
-
               var enableHalationScatter: Int32 = 1
               var scatterAmount: Float = 1.0
               var scatterSize: Float = 1.0
@@ -495,7 +495,6 @@ jobs:
               var highlightBoostEV: Float = 0.0
               var boostRange: Float = 1.5
               var boostProtectStops: Float = 1.0
-
               var printExposureEV: Float = 0.0
               var autoPrintExposure: Int32 = 1
               var printGamma: Float = 1.0
@@ -511,7 +510,6 @@ jobs:
               var printDiffusionStrength: Float = 0.25
               var printDiffusionSize: Float = 1.0
               var printDiffusionWarmth: Float = 0.0
-
               var enableGrain: Int32 = 1
               var granularity: Float = 1.0
               var grainStrength: Float = 1.0
@@ -523,7 +521,6 @@ jobs:
               var recoveryRadius: Float = 1.2
               var recoveryStrength: Float = 0.65
               var randomSeed: UInt32 = 1337
-
               var enableGamutCompression: Int32 = 1
               var preCompressionBoost: Float = 0.0
               var postCompressionScale: Float = 1.0
@@ -538,7 +535,6 @@ jobs:
               var outputColorSpace: Int32 = 0
               var splitPreviewMode: Int32 = 0
               var splitPosition: Float = 0.5
-
               var filmDmin: SIMD3<Float> = SIMD3<Float>(0.12, 0.48, 0.78)
               var filmDmax: SIMD3<Float> = SIMD3<Float>(2.15, 2.55, 2.85)
               var filmSlope: SIMD3<Float> = SIMD3<Float>(0.68, 0.72, 0.74)
@@ -548,14 +544,12 @@ jobs:
               var filmIsReversal: Int32 = 0
               var filmIsBlackAndWhite: Int32 = 0
               var filmIsTungsten: Int32 = 0
-
               var paperDmin: SIMD3<Float> = SIMD3<Float>(0.04, 0.04, 0.05)
               var paperDmax: SIMD3<Float> = SIMD3<Float>(2.35, 2.38, 2.32)
               var paperSlope: SIMD3<Float> = SIMD3<Float>(2.45, 2.48, 2.42)
               var paperCrossMatrixRow0: SIMD3<Float> = SIMD3<Float>(0.96, 0.03, 0.01)
               var paperCrossMatrixRow1: SIMD3<Float> = SIMD3<Float>(0.02, 0.95, 0.03)
               var paperCrossMatrixRow2: SIMD3<Float> = SIMD3<Float>(0.01, 0.03, 0.96)
-
               var filmMatrixRow0: SIMD3<Float> = SIMD3<Float>(0.88, 0.10, 0.02)
               var filmMatrixRow1: SIMD3<Float> = SIMD3<Float>(0.05, 0.87, 0.08)
               var filmMatrixRow2: SIMD3<Float> = SIMD3<Float>(0.02, 0.11, 0.87)
@@ -635,6 +629,20 @@ jobs:
                   FilmStockProfile(id: 14, slug: "kodak_tri_x_400", name: "Kodak Tri-X 400", iso: 400, defaultPaperID: 8, dmin: SIMD3(0.20,0.20,0.20), dmax: SIMD3(2.35,2.35,2.35), slope: SIMD3(0.78,0.78,0.78), sensShift: SIMD3(0,0,0), halationRatio: SIMD3(0.055,0.055,0.055), rmsGranularity: 0.050, isReversal: false, isBlackAndWhite: true, isTungsten: false)
               ]
           }
+          EOF_CAT
+          fi
+
+      - name: 3d. Generate Swift Metal ViewModel & CIRAWFilter Decoder (SpektrafilmViewModel.swift)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmViewModel.swift" ]; then
+          cat << 'EOF_VM' > Sources/SpektrafilmViewModel.swift
+          import SwiftUI
+          import Metal
+          import MetalKit
+          import CoreImage
+          import CoreImage.CIFilterBuiltins
 
           @MainActor
           final class SpektrafilmViewModel: ObservableObject {
@@ -798,15 +806,14 @@ jobs:
                   return img.cgImage!
               }
           }
-          EOF_CORE
+          EOF_VM
           fi
 
-      - name: 3c. Generate SwiftUI Darkroom Interface (SpektrafilmUI.swift)
+      - name: 3e. Generate SwiftUI Darkroom Interface (SpektrafilmUI.swift)
         shell: bash
         run: |
           set -euo pipefail
           if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmUI.swift" ]; then
-          echo "Generating Sources/SpektrafilmUI.swift..."
           cat << 'EOF_UI' > Sources/SpektrafilmUI.swift
           import SwiftUI
           import PhotosUI
@@ -954,7 +961,7 @@ jobs:
           EOF_UI
           fi
 
-      - name: 3d. Generate Info.plist & XcodeGen project.yml
+      - name: 3f. Generate Info.plist & XcodeGen project.yml
         shell: bash
         env:
           DEPLOY_TARGET: ${{ inputs.ios_deployment_target || '16.0' }}
@@ -1026,6 +1033,7 @@ jobs:
               ONLY_ACTIVE_ARCH: NO
               SWIFT_VERSION: "5.9"
               TARGETED_DEVICE_FAMILY: "1,2"
+              GENERATE_INFOPLIST_FILE: NO
               MTL_ENABLE_DEBUG_INFO: NO
               MTL_FAST_MATH: YES
               CODE_SIGN_IDENTITY: ""
@@ -1060,7 +1068,8 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
 
       - name: 5. Fake-Sign with ldid & Package Direct .ipa
         run: |
