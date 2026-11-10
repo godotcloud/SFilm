@@ -2,19 +2,12 @@
 # Spektrafilm iOS Native App — Self-Contained Extraction-Free GitHub Actions Workflow
 # 自包含免解压 GitHub Actions 编译工作流 (.github/workflows/build.yml)
 #
-# 核心特性：
-# 1. 【源码自包含免解压】：无需在仓库上传或解压任何源码压缩包，只需将本文件放入
-#    `.github/workflows/build.yml`，若仓库内不存在 Sources/ 源码，工作流会自动通过纯文本
-#    Heredoc 生成完整 Metal 光谱着色器、SwiftUI 原生源码、Info.plist 与 XcodeGen 配置。
-# 2. 【针对 iPhone 13 Pro Max 深度优化】：
-#    - 目标设备架构：arm64 (Apple A15 Bionic 5-Core GPU, Metal 3.0)
-#    - 屏幕与高刷支持：6.7" Super Retina XDR (1284×2778 @3x, Display P3 广色域,
-#      开启 CADisableMinimumFrameDurationOnPhone 120Hz ProMotion 实时预览)
-#    - 影像管线支持：原生 CIRAWFilter 解码 iPhone 13 Pro Max Apple ProRAW (.dng)
-# 3. 【产物免解压直装 (.ipa)】：
-#    - 自动使用 ldid 注入 TrollStore / SideStore / AltStore 兼容签名
-#    - 通过 GitHub Releases 直接发布未套壳的 `.ipa` 原文件（Safari 点击直链免解压安装），
-#      同时上传 `compression-level: 0` 的 GitHub Actions Artifact。
+# 修复说明 (Fix for Line 71 Exceeded max expression length 21000)：
+# - GitHub Actions 解析器在遇到包含 `${{ ... }}` 的 `run:` 块时，会将整个 `run:` 脚本
+#   转换为单个内部 `format()` 表达式，并强制执行 21,000 字符上限检查。
+# - 本版本将自包含源码生成拆分为 4 个独立子步骤（Metal 着色器、Swift 数据与渲染引擎、
+#   SwiftUI 暗房界面、Info.plist 与 XcodeGen 配置），彻底移除大脚本内的 `${{ ... }}`
+#   内联表达式（改用环境变量注入），且每个步骤的脚本长度均严格控制在 15,000 字符以内。
 #
 # 上游致谢与开源许可 (GPL-3.0)：
 # - Film modeling powered by spektrafilm (Andrea Volpato): https://github.com/andreavolpato/spektrafilm
@@ -48,7 +41,7 @@ permissions:
 env:
   APP_NAME: "Spektrafilm"
   BUNDLE_ID: "org.pixls.spektrafilm.ios"
-  TARGET_DEVICE_MODEL: "iPhone14,3" # iPhone 13 Pro Max identifier
+  TARGET_DEVICE_MODEL: "iPhone14,3"
 
 jobs:
   build-ios-ipa:
@@ -66,24 +59,16 @@ jobs:
           which ldid || brew install ldid
           xcodebuild -version
 
-      - name: 3. Generate Self-Contained Source Tree (Zero-Archive / Extraction-Free)
+      - name: 3a. Generate Metal Spectral Shader (SpektrafilmEngine.metal)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p Sources Resources
-
-          # --------------------------------------------------------------------
-          # 3.1 Generate Metal Compute Shader (SpektrafilmEngine.metal) if absent
-          # --------------------------------------------------------------------
           if [ ! -f "Sources/SpektrafilmEngine.metal" ]; then
-            echo "Generating Sources/SpektrafilmEngine.metal inline..."
-            cat << 'EOF_METAL' > Sources/SpektrafilmEngine.metal
-          //
-          //  SpektrafilmEngine.metal
-          //  Spektrafilm iOS Native Port (Optimized for iPhone 13 Pro Max A15 Bionic GPU)
-          //  Film modeling powered by spektrafilm — https://github.com/andreavolpato/spektrafilm
-          //  License: GPL-3.0
-          //
+          echo "Generating Sources/SpektrafilmEngine.metal..."
+          cat << 'EOF_METAL' > Sources/SpektrafilmEngine.metal
+          //  SpektrafilmEngine.metal — iPhone 13 Pro Max (A15 Bionic 5-Core GPU)
+          //  Film modeling powered by spektrafilm — https://github.com/andreavolpato/spektrafilm (GPL-3.0)
           #include <metal_stdlib>
           using namespace metal;
 
@@ -205,25 +190,15 @@ jobs:
           }
 
           inline float3 evaluate_hd_curve(
-              float3 logE,
-              float3 dmin,
-              float3 dmax,
-              float3 baseSlope,
-              float devGamma,
-              float fastGamma,
-              float slowGamma,
-              float exhaustion,
-              int isReversal
+              float3 logE, float3 dmin, float3 dmax, float3 baseSlope,
+              float devGamma, float fastGamma, float slowGamma, float exhaustion, int isReversal
           ) {
               float3 span = max(dmax - dmin, float3(0.1f));
-              float3 slope = baseSlope * devGamma;
-              float3 x = logE * slope;
+              float3 x = logE * (baseSlope * devGamma);
               float3 slowPart = tanh(x * slowGamma * 0.85f);
               float3 fastPart = tanh((x - 0.35f) * fastGamma * 0.75f);
               float3 normalized = clamp(0.5f + 0.32f * slowPart + 0.22f * fastPart, 0.0f, 1.0f);
-              if (isReversal != 0) {
-                  normalized = 1.0f - normalized;
-              }
+              if (isReversal != 0) normalized = 1.0f - normalized;
               if (exhaustion > 0.0001f) {
                   normalized = normalized / (1.0f + exhaustion * 0.45f * normalized * normalized);
               }
@@ -234,69 +209,46 @@ jobs:
               float l = 0.4122214708f * rgb.r + 0.5363325363f * rgb.g + 0.0514459929f * rgb.b;
               float m = 0.2119034982f * rgb.r + 0.6806995451f * rgb.g + 0.1073969566f * rgb.b;
               float s = 0.0883024619f * rgb.r + 0.2817188376f * rgb.g + 0.6299787005f * rgb.b;
-
-              float l_ = cbrt(max(l, 0.0f));
-              float m_ = cbrt(max(m, 0.0f));
-              float s_ = cbrt(max(s, 0.0f));
-
+              float l_ = cbrt(max(l, 0.0f)), m_ = cbrt(max(m, 0.0f)), s_ = cbrt(max(s, 0.0f));
               float L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_;
               float a = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_;
               float b = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_;
-
               float C = sqrt(a * a + b * b);
               if (C > 0.0001f) {
                   float maxC = 0.28f;
-                  float compressedC = maxC * tanh(C / maxC);
-                  float scale = compressedC / C;
+                  float scale = (maxC * tanh(C / maxC)) / C;
                   a *= scale;
                   b *= scale;
               }
               L = L / (1.0f + 0.18f * max(L - 0.75f, 0.0f));
-
-              float l_out = L + 0.3963377774f * a + 0.2158037573f * b;
-              float m_out = L - 0.1055613458f * a - 0.0638541728f * b;
-              float s_out = L - 0.0894841775f * a - 1.2914855480f * b;
-
-              float l3 = l_out * l_out * l_out;
-              float m3 = m_out * m_out * m_out;
-              float s3 = s_out * s_out * s_out;
-
-              float3 outRGB;
-              outRGB.r = +4.0767416621f * l3 - 3.3077115913f * m3 + 0.2309699292f * s3;
-              outRGB.g = -1.2684380046f * l3 + 2.6097574011f * m3 - 0.3413193965f * s3;
-              outRGB.b = -0.0041960863f * l3 - 0.7034186147f * m3 + 1.7076147010f * s3;
-              return max(outRGB, float3(0.0f));
+              float l_o = L + 0.3963377774f * a + 0.2158037573f * b;
+              float m_o = L - 0.1055613458f * a - 0.0638541728f * b;
+              float s_o = L - 0.0894841775f * a - 1.2914855480f * b;
+              float l3 = l_o * l_o * l_o, m3 = m_o * m_o * m_o, s3 = s_o * s_o * s_o;
+              return max(float3(
+                  +4.0767416621f * l3 - 3.3077115913f * m3 + 0.2309699292f * s3,
+                  -1.2684380046f * l3 + 2.6097574011f * m3 - 0.3413193965f * s3,
+                  -0.0041960863f * l3 - 0.7034186147f * m3 + 1.7076147010f * s3
+              ), float3(0.0f));
           }
 
           inline float3 linear_to_srgb(float3 x) {
-              float3 clamped = clamp(x, 0.0f, 1.0f);
-              float3 lo = clamped * 12.92f;
-              float3 hi = 1.055f * pow(clamped, float3(1.0f / 2.4f)) - 0.055f;
-              return select(lo, hi, clamped > 0.0031308f);
+              float3 c = clamp(x, 0.0f, 1.0f);
+              return select(c * 12.92f, 1.055f * pow(c, float3(1.0f / 2.4f)) - 0.055f, c > 0.0031308f);
           }
 
           inline float3 srgb_to_linear(float3 x) {
-              float3 clamped = clamp(x, 0.0f, 1.0f);
-              float3 lo = clamped / 12.92f;
-              float3 hi = pow((clamped + 0.055f) / 1.055f, float3(2.4f));
-              return select(lo, hi, clamped > 0.04045f);
+              float3 c = clamp(x, 0.0f, 1.0f);
+              return select(c / 12.92f, pow((c + 0.055f) / 1.055f, float3(2.4f)), c > 0.04045f);
           }
 
           inline float3 sample_spatial_blur(
-              texture2d<float, access::sample> tex,
-              sampler s,
-              float2 uv,
-              float2 texelSize,
-              float radiusPx
+              texture2d<float, access::sample> tex, sampler s, float2 uv, float2 texelSize, float radiusPx
           ) {
-              if (radiusPx <= 0.05f) {
-                  return srgb_to_linear(tex.sample(s, uv).rgb);
-              }
+              if (radiusPx <= 0.05f) return srgb_to_linear(tex.sample(s, uv).rgb);
               const float2 offsets[8] = {
-                  float2( 1.0f,  0.0f), float2(-1.0f,  0.0f),
-                  float2( 0.0f,  1.0f), float2( 0.0f, -1.0f),
-                  float2( 0.707f,  0.707f), float2(-0.707f,  0.707f),
-                  float2( 0.707f, -0.707f), float2(-0.707f, -0.707f)
+                  float2(1.0f, 0.0f), float2(-1.0f, 0.0f), float2(0.0f, 1.0f), float2(0.0f, -1.0f),
+                  float2(0.707f, 0.707f), float2(-0.707f, 0.707f), float2(0.707f, -0.707f), float2(-0.707f, -0.707f)
               };
               float3 accum = srgb_to_linear(tex.sample(s, uv).rgb) * 0.28f;
               float weightSum = 0.28f;
@@ -316,11 +268,8 @@ jobs:
               constant SpektrafilmUniforms& u [[buffer(0)]],
               uint2 gid [[thread_position_in_grid]]
           ) {
-              uint width = outTexture.get_width();
-              uint height = outTexture.get_height();
-              if (gid.x >= width || gid.y >= height) {
-                  return;
-              }
+              uint width = outTexture.get_width(), height = outTexture.get_height();
+              if (gid.x >= width || gid.y >= height) return;
 
               constexpr sampler texSampler(coord::normalized, address::clamp_to_edge, filter::linear);
               float2 uv = (float2(gid) + 0.5f) / float2(float(width), float(height));
@@ -346,9 +295,7 @@ jobs:
                   1.0f - u.wbTintOffset * 0.20f,
                   1.0f - u.wbTemperatureOffset * 0.35f + u.wbTintOffset * 0.15f
               );
-              if (u.balanceToFilmStock != 0 && u.filmIsTungsten != 0) {
-                  wbGain *= float3(1.32f, 1.02f, 0.72f);
-              }
+              if (u.balanceToFilmStock != 0 && u.filmIsTungsten != 0) wbGain *= float3(1.32f, 1.02f, 0.72f);
               sceneLinear = max(sceneLinear * wbGain, float3(1e-5f));
 
               if (abs(u.highlightBoostEV) > 0.001f) {
@@ -356,8 +303,7 @@ jobs:
                   float threshold = 0.18f * exp2(u.boostProtectStops);
                   if (luma > threshold) {
                       float excess = (luma - threshold) / max(u.boostRange, 0.2f);
-                      float boostFactor = exp2(u.highlightBoostEV * tanh(excess));
-                      sceneLinear *= boostFactor;
+                      sceneLinear *= exp2(u.highlightBoostEV * tanh(excess));
                   }
               }
 
@@ -367,8 +313,7 @@ jobs:
                   float3 warmthTint = float3(1.0f + 0.18f * u.cameraDiffusionWarmth, 1.0f, 1.0f - 0.18f * u.cameraDiffusionWarmth);
                   float blendAmt = clamp(u.cameraDiffusionStrength * 0.45f, 0.0f, 0.85f);
                   if (u.cameraDiffusionType == 0) {
-                      float3 highlightHalo = max(halo - 0.12f, 0.0f) * warmthTint;
-                      sceneLinear = mix(sceneLinear, sceneLinear + highlightHalo * 0.85f, blendAmt);
+                      sceneLinear = mix(sceneLinear, sceneLinear + max(halo - 0.12f, 0.0f) * warmthTint * 0.85f, blendAmt);
                   } else if (u.cameraDiffusionType == 1) {
                       sceneLinear = mix(sceneLinear, halo * warmthTint, blendAmt * 0.65f);
                   } else {
@@ -376,11 +321,11 @@ jobs:
                   }
               }
 
-              float3 filmIrradiance;
-              filmIrradiance.r = dot(u.filmMatrixRow0, sceneLinear);
-              filmIrradiance.g = dot(u.filmMatrixRow1, sceneLinear);
-              filmIrradiance.b = dot(u.filmMatrixRow2, sceneLinear);
-              filmIrradiance = max(filmIrradiance, float3(1e-5f));
+              float3 filmIrradiance = max(float3(
+                  dot(u.filmMatrixRow0, sceneLinear),
+                  dot(u.filmMatrixRow1, sceneLinear),
+                  dot(u.filmMatrixRow2, sceneLinear)
+              ), float3(1e-5f));
 
               if (u.enableHalationScatter != 0) {
                   if (u.scatterAmount > 0.001f) {
@@ -391,8 +336,7 @@ jobs:
                   if (u.halationStrength > 0.001f) {
                       float halRad = u.halationSize * 22.0f * formatScale * pxScale;
                       float3 halBlur = sample_spatial_blur(inTexture, texSampler, uv, texelSize, halRad) * wbGain;
-                      float3 brightHal = max(halBlur - float3(0.18f), float3(0.0f));
-                      filmIrradiance += brightHal * u.filmHalationRatio * (u.halationStrength * 4.5f);
+                      filmIrradiance += max(halBlur - float3(0.18f), float3(0.0f)) * u.filmHalationRatio * (u.halationStrength * 4.5f);
                   }
               }
 
@@ -402,8 +346,7 @@ jobs:
 
               float3 filmDensity = evaluate_hd_curve(
                   logExposure, u.filmDmin, u.filmDmax, u.filmSlope,
-                  effectiveDevGamma, u.fastLayerGamma, u.slowLayerGamma,
-                  u.developerExhaustion, u.filmIsReversal
+                  effectiveDevGamma, u.fastLayerGamma, u.slowLayerGamma, u.developerExhaustion, u.filmIsReversal
               );
 
               if (u.dirStrength > 0.001f && u.filmIsReversal == 0) {
@@ -416,9 +359,8 @@ jobs:
                       neighborLogE, u.filmDmin, u.filmDmax, u.filmSlope,
                       effectiveDevGamma, u.fastLayerGamma, u.slowLayerGamma, u.developerExhaustion, 0
                   );
-                  float3 localContrastDelta = filmDensity - neighborD;
                   float3 interlayerShift = (netDensity - float3(meanDensity)) * (u.interlayerInhibition * 0.38f * u.dirStrength);
-                  float3 spatialEdgeBoost = localContrastDelta * (0.28f * u.dirStrength) - netDensity * (u.sameLayerInhibition * 0.08f * u.dirStrength);
+                  float3 spatialEdgeBoost = (filmDensity - neighborD) * (0.28f * u.dirStrength) - netDensity * (u.sameLayerInhibition * 0.08f * u.dirStrength);
                   filmDensity = clamp(filmDensity + interlayerShift + spatialEdgeBoost, u.filmDmin, u.filmDmax);
               }
 
@@ -436,8 +378,7 @@ jobs:
                       rand_gaussian(gid, 1u, 1u, u.randomSeed),
                       rand_gaussian(gid, 2u, 1u, u.randomSeed)
                   );
-                  float subMix = clamp(u.sublayerScale * 0.5f, 0.0f, 0.85f);
-                  float3 combinedNoise = mix(noiseCoarse, noiseFine, subMix);
+                  float3 combinedNoise = mix(noiseCoarse, noiseFine, clamp(u.sublayerScale * 0.5f, 0.0f, 0.85f));
                   float rmsScale = u.filmBaseRMSGranularity * pow(max(u.granularity, 0.1f), 0.75f) * u.grainStrength * formatScale;
                   filmDensity = clamp(filmDensity + combinedNoise * crystalEnvelope * rmsScale, u.filmDmin, u.filmDmax);
               }
@@ -447,57 +388,46 @@ jobs:
 
               if (u.printPaperID == 0 || u.processMode == 1 || u.filmIsReversal != 0) {
                   if (u.filmIsReversal != 0) {
-                      scannedLinearRGB = pow(float3(10.0f), -(filmDensity - u.filmDmin));
+                      scannedLinearRGB = filmTransmittance;
                   } else {
                       float3 normNeg = clamp((filmDensity - u.filmDmin) / max(u.filmDmax - u.filmDmin, float3(0.1f)), 0.0f, 1.0f);
                       scannedLinearRGB = pow(normNeg, float3(1.65f));
                   }
               } else {
                   float autoCompEV = (u.autoPrintExposure != 0) ? (-u.filmExposureEV + u.pushPullStops) : 0.0f;
-                  float totalPrintEV = u.printExposureEV + autoCompEV;
                   float3 dichroicFilter = float3(1.0f, exp2(-u.filtrationM * 0.025f), exp2(-u.filtrationY * 0.025f));
-                  float3 enlargerLight = filmTransmittance * dichroicFilter * exp2(totalPrintEV);
-
+                  float3 enlargerLight = filmTransmittance * dichroicFilter * exp2(u.printExposureEV + autoCompEV);
                   if (u.preflashExposure > 0.0001f) {
                       float3 preflashFilter = float3(1.0f, exp2(-u.preflashM * 0.025f), exp2(-u.preflashY * 0.025f));
                       enlargerLight += preflashFilter * (u.preflashExposure * 0.08f);
                   }
-
-                  float3 paperExposure;
-                  paperExposure.r = dot(u.paperCrossMatrixRow0, enlargerLight);
-                  paperExposure.g = dot(u.paperCrossMatrixRow1, enlargerLight);
-                  paperExposure.b = dot(u.paperCrossMatrixRow2, enlargerLight);
-                  paperExposure = max(paperExposure, float3(1e-6f));
-
+                  float3 paperExposure = max(float3(
+                      dot(u.paperCrossMatrixRow0, enlargerLight),
+                      dot(u.paperCrossMatrixRow1, enlargerLight),
+                      dot(u.paperCrossMatrixRow2, enlargerLight)
+                  ), float3(1e-6f));
                   float3 paperLogE = -log10(paperExposure);
                   float3 channelGamma = float3(u.printGammaR, u.printGammaG, u.printGammaB) * u.printGamma;
-                  float3 paperSpan = max(u.paperDmax - u.paperDmin, float3(0.2f));
-                  float3 paperX = (paperLogE - 0.42f) * u.paperSlope * channelGamma;
-                  float3 paperNorm = clamp(0.5f + 0.5f * tanh(paperX * 1.35f), 0.0f, 1.0f);
-                  float3 paperDensity = u.paperDmin + paperSpan * paperNorm;
+                  float3 paperNorm = clamp(0.5f + 0.5f * tanh((paperLogE - 0.42f) * u.paperSlope * channelGamma * 1.35f), 0.0f, 1.0f);
+                  float3 paperDensity = u.paperDmin + max(u.paperDmax - u.paperDmin, float3(0.2f)) * paperNorm;
                   scannedLinearRGB = pow(float3(10.0f), -(paperDensity - u.paperDmin));
 
                   if (u.enablePrintDiffusion != 0 && u.printDiffusionStrength > 0.001f) {
-                      float3 shadowSpread = scannedLinearRGB * (1.0f - 0.18f * u.printDiffusionStrength);
-                      scannedLinearRGB = mix(scannedLinearRGB, shadowSpread, clamp(u.printDiffusionStrength * 0.5f, 0.0f, 0.7f));
+                      scannedLinearRGB = mix(scannedLinearRGB, scannedLinearRGB * (1.0f - 0.18f * u.printDiffusionStrength), clamp(u.printDiffusionStrength * 0.5f, 0.0f, 0.7f));
                   }
                   if (u.viewingGlare > 0.0001f) {
-                      scannedLinearRGB = scannedLinearRGB + float3(u.viewingGlare * 0.04f) * (1.0f - scannedLinearRGB);
+                      scannedLinearRGB += float3(u.viewingGlare * 0.04f) * (1.0f - scannedLinearRGB);
                   }
               }
 
               if (u.filmIsBlackAndWhite != 0) {
                   float bwLuma = dot(scannedLinearRGB, float3(0.299f, 0.587f, 0.114f));
-                  float3 paperTint = float3(1.0f + u.filtrationY * 0.004f, 1.0f - u.filtrationM * 0.003f, 1.0f - u.filtrationY * 0.005f);
-                  scannedLinearRGB = float3(bwLuma) * clamp(paperTint, 0.75f, 1.25f);
+                  float3 paperTint = clamp(float3(1.0f + u.filtrationY * 0.004f, 1.0f - u.filtrationM * 0.003f, 1.0f - u.filtrationY * 0.005f), 0.75f, 1.25f);
+                  scannedLinearRGB = float3(bwLuma) * paperTint;
               }
 
-              if (abs(u.preCompressionBoost) > 0.001f) {
-                  scannedLinearRGB *= exp2(u.preCompressionBoost * 0.65f);
-              }
-              if (u.enableGamutCompression != 0) {
-                  scannedLinearRGB = apply_oklch_gamut_compression(scannedLinearRGB);
-              }
+              if (abs(u.preCompressionBoost) > 0.001f) scannedLinearRGB *= exp2(u.preCompressionBoost * 0.65f);
+              if (u.enableGamutCompression != 0) scannedLinearRGB = apply_oklch_gamut_compression(scannedLinearRGB);
               scannedLinearRGB *= max(u.postCompressionScale, 0.1f);
 
               if (u.blackPointCorrection != 0 || u.whitePointCorrection != 0) {
@@ -508,10 +438,8 @@ jobs:
 
               float totalSharpen = u.scannerSharpenStrength * 0.35f + (u.enableGrain != 0 ? u.recoveryStrength * 0.2f : 0.0f);
               if (totalSharpen > 0.005f) {
-                  float sharpRad = max(u.scannerSharpenRadius, 1.0f);
-                  float3 localBlur = sample_spatial_blur(inTexture, texSampler, uv, texelSize, sharpRad);
-                  float3 detail = srgb_to_linear(srcPixel.rgb) - localBlur;
-                  scannedLinearRGB = max(scannedLinearRGB + detail * totalSharpen * 0.45f, float3(0.0f));
+                  float3 localBlur = sample_spatial_blur(inTexture, texSampler, uv, texelSize, max(u.scannerSharpenRadius, 1.0f));
+                  scannedLinearRGB = max(scannedLinearRGB + (srgb_to_linear(srcPixel.rgb) - localBlur) * totalSharpen * 0.45f, float3(0.0f));
               }
 
               float3 finalOut = (u.outputColorSpace == 2) ? clamp(scannedLinearRGB, 0.0f, 1.0f) : linear_to_srgb(scannedLinearRGB);
@@ -520,19 +448,18 @@ jobs:
           EOF_METAL
           fi
 
-          # --------------------------------------------------------------------
-          # 3.2 Generate SwiftUI + Metal App (SpektrafilmIOSApp.swift) if absent
-          # --------------------------------------------------------------------
-          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ]; then
-            echo "Generating Sources/SpektrafilmIOSApp.swift inline..."
-            cat << 'EOF_SWIFT' > Sources/SpektrafilmIOSApp.swift
+      - name: 3b. Generate Swift Data Catalog & Metal Renderer (SpektrafilmCore.swift)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmCore.swift" ]; then
+          echo "Generating Sources/SpektrafilmCore.swift..."
+          cat << 'EOF_CORE' > Sources/SpektrafilmCore.swift
           import SwiftUI
           import Metal
           import MetalKit
           import CoreImage
           import CoreImage.CIFilterBuiltins
-          import PhotosUI
-          import UniformTypeIdentifiers
 
           struct SpektrafilmUniforms {
               var filmStockID: Int32 = 0
@@ -719,7 +646,6 @@ jobs:
               }
               @Published var renderedUIImage: UIImage?
               @Published var imageMetadataSummary: String = "Spectral ColorChecker & 14-Stop Halation Target"
-              @Published var statusBanner: String?
 
               let device: MTLDevice?
               private let commandQueue: MTLCommandQueue?
@@ -801,8 +727,7 @@ jobs:
 
               func renderSimulation() {
                   guard let dev = device, let queue = commandQueue, let pipeline = pipelineState, let inTex = sourceTexture else { return }
-                  let width = inTex.width
-                  let height = inTex.height
+                  let width = inTex.width, height = inTex.height
                   let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
                   desc.usage = [.shaderWrite, .shaderRead]
                   guard let outTex = dev.makeTexture(descriptor: desc),
@@ -873,6 +798,18 @@ jobs:
                   return img.cgImage!
               }
           }
+          EOF_CORE
+          fi
+
+      - name: 3c. Generate SwiftUI Darkroom Interface (SpektrafilmUI.swift)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "Sources/SpektrafilmIOSApp.swift" ] && [ ! -f "Sources/SpektrafilmUI.swift" ]; then
+          echo "Generating Sources/SpektrafilmUI.swift..."
+          cat << 'EOF_UI' > Sources/SpektrafilmUI.swift
+          import SwiftUI
+          import PhotosUI
 
           enum DarkroomStageTab: String, CaseIterable, Identifiable {
               case film = "Film", print = "Print", grain = "Grain", halation = "Halation", scanner = "Scanner"
@@ -1014,12 +951,15 @@ jobs:
                   }
               }
           }
-          EOF_SWIFT
+          EOF_UI
           fi
 
-          # --------------------------------------------------------------------
-          # 3.3 Generate Info.plist (ProMotion 120Hz & Photo Library Permissions)
-          # --------------------------------------------------------------------
+      - name: 3d. Generate Info.plist & XcodeGen project.yml
+        shell: bash
+        env:
+          DEPLOY_TARGET: ${{ inputs.ios_deployment_target || '16.0' }}
+        run: |
+          set -euo pipefail
           cat << 'EOF_PLIST' > Resources/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1073,10 +1013,6 @@ jobs:
           </plist>
           EOF_PLIST
 
-          # --------------------------------------------------------------------
-          # 3.4 Generate XcodeGen project.yml targeting iPhone 13 Pro Max (arm64)
-          # --------------------------------------------------------------------
-          DEPLOY_TARGET="${{ github.event.inputs.ios_deployment_target || '16.0' }}"
           cat << EOF_PROJ > project.yml
           name: Spektrafilm
           options:
@@ -1131,14 +1067,10 @@ jobs:
           set -euo pipefail
           APP_PATH=$(find build_output/Build/Products/Release-iphoneos -name "Spektrafilm.app" -type d | head -n 1)
           echo "Located compiled bundle: ${APP_PATH}"
-
-          # Fake-sign binary with ldid for TrollStore / SideStore / AltStore / Sideloadly compatibility
           ldid -S "${APP_PATH}/Spektrafilm"
-
           mkdir -p Payload
           cp -R "${APP_PATH}" Payload/
           zip -qry Spektrafilm-iOS-iPhone13ProMax.ipa Payload
-
           ls -lh Spektrafilm-iOS-iPhone13ProMax.ipa
           shasum -a 256 Spektrafilm-iOS-iPhone13ProMax.ipa > Spektrafilm-iOS-iPhone13ProMax.ipa.sha256
 
@@ -1153,7 +1085,7 @@ jobs:
           if-no-files-found: error
 
       - name: 7. Publish Extraction-Free Direct .ipa to GitHub Releases (免解压直下)
-        if: ${{ github.event.inputs.publish_release_ipa != 'false' }}
+        if: ${{ inputs.publish_release_ipa != 'false' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "ios-build-${{ github.run_number }}"
@@ -1169,10 +1101,10 @@ jobs:
 
       - name: 8. Write Build & Direct Download Summary
         run: |
-          cat << EOF >> $GITHUB_STEP_SUMMARY
+          cat << 'EOF_SUMMARY' >> $GITHUB_STEP_SUMMARY
           ## Spektrafilm iOS (iPhone 13 Pro Max) 编译完成
           - **目标硬件**：iPhone 13 Pro Max (`iPhone14,3`, Apple A15 Bionic 5-Core GPU, `arm64`, Display P3, 120Hz ProMotion)
           - **免解压 `.ipa` 获取方式**：
             1. **GitHub Releases 免解压直链（推荐）**：进入本仓库的 **Releases** 页面，直接点击 `Spektrafilm-iOS-iPhone13ProMax.ipa` 即可在 iPhone Safari 中免解压下载 `.ipa` 并导入 TrollStore / SideStore / AltStore。
             2. **Actions Artifacts**：在当前运行页底部下载 `Spektrafilm-iOS-iPhone13ProMax-IPA`（已设为 0 压缩率快速打包）。
-          EOF
+          EOF_SUMMARY
